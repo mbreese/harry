@@ -187,10 +187,20 @@ func (h *Handler) handleBootstrap(qname, domain string, q *dns.Question, msg *dn
 		return true
 
 	case len(parts) == 3 && parts[1] == "s" && parts[2] == "boot":
+		// Stage 2 script chunks: <n>.s.boot.<domain>
 		return h.handleStage2Chunk(parts[0], q, msg)
 
+	case len(parts) == 4 && parts[2] == "s" && parts[3] == "boot":
+		// Cache-busted stage 2: <random>.<n>.s.boot.<domain>
+		return h.handleStage2Chunk(parts[1], q, msg)
+
 	case len(parts) == 3 && parts[2] == "boot":
+		// File chunks: <chunk>.<filename>.boot.<domain>
 		return h.handleBootstrapChunk(parts[0], parts[1], q, msg)
+
+	case len(parts) == 4 && parts[3] == "boot":
+		// Cache-busted file chunks: <random>.<chunk>.<filename>.boot.<domain>
+		return h.handleBootstrapChunk(parts[1], parts[2], q, msg)
 
 	default:
 		return false
@@ -206,17 +216,19 @@ func (h *Handler) bootstrapHelp() string {
 }
 
 // stage1Script returns a tiny script (<255 chars) that fetches and evals stage 2.
+// Uses $$ (PID) as cache-buster prefix on each DNS query.
 func (h *Handler) stage1Script() string {
 	return fmt.Sprintf(
-		`i=0;S=;while :;do C=$(dig +short TXT $i.s.boot.%s|xargs);case $C in ?*)S=${S}$C;i=$((i+1));;*)break;;esac;done;eval $S`,
+		`i=0;S=;while :;do C=$(dig +short TXT $$.$i.s.boot.%s|xargs);case $C in ?*)S=${S}$C;i=$((i+1));;*)break;;esac;done;eval $S`,
 		h.config.Domain,
 	)
 }
 
 // stage2Script returns the full download script.
 // No double quotes allowed - chunks go through xargs.
+// Uses $$$i as cache-buster prefix (PID + chunk index = unique per query).
 func (h *Handler) stage2Script() string {
-	return fmt.Sprintf(`D=%s;O=$(uname -s|tr A-Z a-z);A=$(uname -m);case $A in x86_64)A=amd64;;aarch64)A=arm64;;esac;F=harry-$O-$A;SZ=$(dig +short TXT sz.$F.boot.$D|tail -1|tr -dc 0-9);H=$(dig +short TXT sha1.$F.boot.$D|tail -1|tr -dc 0-9a-f);echo downloading $F size=$SZ sha1=$H;N=$(dig +short TXT n.$F.boot.$D|tail -1|tr -dc 0-9);echo $N chunks;i=0;B=;while [ $i -lt $N ];do C=$(dig +short TXT $i.$F.boot.$D|tr -dc A-Za-z0-9+/=);B=${B}$C;i=$((i+1));case $((i%%100)) in 0)echo $i/$N;;esac;done;echo;printf %%s $B|base64 -d|gunzip>harry;chmod +x harry;set -- $(sha1sum harry 2>/dev/null||shasum harry);G=$1;case $G in $H)echo verified sha1=$G;;*)echo HASH MISMATCH expected=$H got=$G;;esac;echo done`,
+	return fmt.Sprintf(`D=%s;P=$$;O=$(uname -s|tr A-Z a-z);A=$(uname -m);case $A in x86_64)A=amd64;;aarch64)A=arm64;;esac;F=harry-$O-$A;SZ=$(dig +short TXT $P.sz.$F.boot.$D|tail -1|tr -dc 0-9);H=$(dig +short TXT $P.sha1.$F.boot.$D|tail -1|tr -dc 0-9a-f);echo downloading $F size=$SZ sha1=$H;N=$(dig +short TXT $P.n.$F.boot.$D|tail -1|tr -dc 0-9);echo $N chunks;i=0;B=;while [ $i -lt $N ];do C=$(dig +short TXT $P$i.$i.$F.boot.$D|tr -dc A-Za-z0-9+/=);B=${B}$C;i=$((i+1));case $((i%%100)) in 0)echo $i/$N;;esac;done;echo;printf %%s $B|base64 -d|gunzip>harry;chmod +x harry;set -- $(sha1sum harry 2>/dev/null||shasum harry);G=$1;case $G in $H)echo verified sha1=$G;;*)echo HASH MISMATCH expected=$H got=$G;;esac;echo done`,
 		h.config.Domain)
 }
 
