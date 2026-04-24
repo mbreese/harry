@@ -167,7 +167,7 @@ func (h *Handler) handleBootstrap(qname, domain string, q *dns.Question, msg *dn
 				Name:   q.Name,
 				Rrtype: dns.TypeTXT,
 				Class:  dns.ClassINET,
-				Ttl:    300,
+				Ttl:    h.config.TTL,
 			},
 			Txt: []string{script},
 		})
@@ -180,7 +180,7 @@ func (h *Handler) handleBootstrap(qname, domain string, q *dns.Question, msg *dn
 				Name:   q.Name,
 				Rrtype: dns.TypeTXT,
 				Class:  dns.ClassINET,
-				Ttl:    300,
+				Ttl:    h.config.TTL,
 			},
 			Txt: splitTXT(help),
 		})
@@ -216,7 +216,7 @@ func (h *Handler) stage1Script() string {
 // stage2Script returns the full download script.
 // No double quotes allowed - chunks go through xargs.
 func (h *Handler) stage2Script() string {
-	return fmt.Sprintf(`D=%s;O=$(uname -s|tr A-Z a-z);A=$(uname -m);case $A in x86_64)A=amd64;;aarch64)A=arm64;;esac;F=harry-$O-$A;I=$(dig +short TXT info.$F.boot.$D|tr -dc 0-9a-f:|head -1);SZ=${I%%:*};H=${I#*:};echo downloading $F size=$SZ sha1=$H;N=$(dig +short TXT n.$F.boot.$D|head -1|tr -dc 0-9);echo $N chunks;i=0;B=;while [ $i -lt $N ];do C=$(dig +short TXT $i.$F.boot.$D|tr -dc A-Za-z0-9+/=);B=${B}$C;i=$((i+1));case $((i%%100)) in 0)echo $i/$N;;esac;done;echo;printf %%s $B|base64 -d|gunzip>harry;chmod +x harry;set -- $(sha1sum harry 2>/dev/null||shasum harry);G=$1;case $G in $H)echo verified sha1=$G;;*)echo HASH MISMATCH expected=$H got=$G;;esac;echo done`,
+	return fmt.Sprintf(`D=%s;O=$(uname -s|tr A-Z a-z);A=$(uname -m);case $A in x86_64)A=amd64;;aarch64)A=arm64;;esac;F=harry-$O-$A;SZ=$(dig +short TXT sz.$F.boot.$D|tr -dc 0-9|head -1);H=$(dig +short TXT sha1.$F.boot.$D|tr -dc 0-9a-f|head -1);echo downloading $F size=$SZ sha1=$H;N=$(dig +short TXT n.$F.boot.$D|head -1|tr -dc 0-9);echo $N chunks;i=0;B=;while [ $i -lt $N ];do C=$(dig +short TXT $i.$F.boot.$D|tr -dc A-Za-z0-9+/=);B=${B}$C;i=$((i+1));case $((i%%100)) in 0)echo $i/$N;;esac;done;echo;printf %%s $B|base64 -d|gunzip>harry;chmod +x harry;set -- $(sha1sum harry 2>/dev/null||shasum harry);G=$1;case $G in $H)echo verified sha1=$G;;*)echo HASH MISMATCH expected=$H got=$G;;esac;echo done`,
 		h.config.Domain)
 }
 
@@ -250,7 +250,7 @@ func (h *Handler) handleStage2Chunk(idxStr string, q *dns.Question, msg *dns.Msg
 				Name:   q.Name,
 				Rrtype: dns.TypeTXT,
 				Class:  dns.ClassINET,
-				Ttl:    300,
+				Ttl:    h.config.TTL,
 			},
 			Txt: []string{""},
 		})
@@ -262,7 +262,7 @@ func (h *Handler) handleStage2Chunk(idxStr string, q *dns.Question, msg *dns.Msg
 			Name:   q.Name,
 			Rrtype: dns.TypeTXT,
 			Class:  dns.ClassINET,
-			Ttl:    300,
+			Ttl:    h.config.TTL,
 		},
 		Txt: []string{chunks[idx]},
 	})
@@ -283,23 +283,37 @@ func (h *Handler) handleBootstrapChunk(chunkID, filename string, q *dns.Question
 				Name:   q.Name,
 				Rrtype: dns.TypeTXT,
 				Class:  dns.ClassINET,
-				Ttl:    300,
+				Ttl:    h.config.TTL,
 			},
 			Txt: []string{fmt.Sprintf("%d", info.totalChunks)},
 		})
 		return true
 	}
 
-	// Return file info: size and SHA1
-	if chunkID == "info" {
+	// Return file size
+	if chunkID == "sz" {
 		msg.Answer = append(msg.Answer, &dns.TXT{
 			Hdr: dns.RR_Header{
 				Name:   q.Name,
 				Rrtype: dns.TypeTXT,
 				Class:  dns.ClassINET,
-				Ttl:    300,
+				Ttl:    h.config.TTL,
 			},
-			Txt: []string{fmt.Sprintf("%d:%s", info.origSize, info.sha1Hex)},
+			Txt: []string{fmt.Sprintf("%d", info.origSize)},
+		})
+		return true
+	}
+
+	// Return file SHA1
+	if chunkID == "sha1" {
+		msg.Answer = append(msg.Answer, &dns.TXT{
+			Hdr: dns.RR_Header{
+				Name:   q.Name,
+				Rrtype: dns.TypeTXT,
+				Class:  dns.ClassINET,
+				Ttl:    h.config.TTL,
+			},
+			Txt: []string{info.sha1Hex},
 		})
 		return true
 	}
@@ -329,7 +343,7 @@ func (h *Handler) handleBootstrapChunk(chunkID, filename string, q *dns.Question
 			Name:   q.Name,
 			Rrtype: dns.TypeTXT,
 			Class:  dns.ClassINET,
-			Ttl:    300,
+			Ttl:    h.config.TTL,
 		},
 		Txt: splitTXT(chunk),
 	})
