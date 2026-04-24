@@ -18,10 +18,10 @@ import (
 const usage = `Usage: harry [flags] <command> [args]
 
 Commands:
-  download <file>            Download a file from the server
+  download <file>            Download a file from the server (saves locally)
   upload <local> [remote]    Upload a file to the server
   list                       List available files on the server
-  fetch <url>                Fetch a URL via the server
+  fetch <url>                Fetch a URL via the server (stdout)
   pipe                       Bidirectional stdin/stdout tunnel
   poll                       Poll for data (testing)
 
@@ -31,7 +31,7 @@ Flags:
 func main() {
 	domain := flag.String("domain", "", "base domain")
 	password := flag.String("password", "", "shared secret")
-	resolver := flag.String("resolver", "", "DNS resolver (host:port)")
+	resolver := flag.String("resolver", "", "DNS resolver (host:port, default: system resolver)")
 	pollInterval := flag.Duration("poll", 30*time.Second, "idle poll interval")
 	noRedirect := flag.Bool("no-redirect", false, "don't follow HTTP redirects (for fetch)")
 	output := flag.String("o", "", "output file (for fetch/download, default: stdout)")
@@ -100,7 +100,11 @@ func main() {
 		if err != nil {
 			log.Fatalf("download failed: %v", err)
 		}
-		writeOutput(data, *output)
+		outPath := *output
+		if outPath == "" {
+			outPath = filepath.Base(cmdArgs[0])
+		}
+		writeOutput(data, outPath)
 
 	case "upload":
 		if len(cmdArgs) < 1 {

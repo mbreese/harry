@@ -46,7 +46,7 @@ func New(cfg *Config) (*Client, error) {
 		cfg.PollInterval = 30 * time.Second
 	}
 	if cfg.Resolver == "" {
-		cfg.Resolver = "8.8.8.8:53"
+		cfg.Resolver = systemResolver()
 	}
 
 	return &Client{
@@ -398,6 +398,29 @@ func (c *Client) sendPacket(pkt *protocol.Packet, clientID byte) (*protocol.Resp
 	}
 
 	return resp2, nil
+}
+
+// systemResolver reads the first nameserver from /etc/resolv.conf.
+// Falls back to 127.0.0.53:53 if the file can't be read.
+func systemResolver() string {
+	data, err := os.ReadFile("/etc/resolv.conf")
+	if err != nil {
+		return "127.0.0.53:53"
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "nameserver") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				ns := fields[1]
+				if !strings.Contains(ns, ":") {
+					ns = ns + ":53"
+				}
+				return ns
+			}
+		}
+	}
+	return "127.0.0.53:53"
 }
 
 func (c *Client) nextCounter() uint32 {

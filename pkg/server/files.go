@@ -33,7 +33,7 @@ func (fs *FileStore) Get(name string) ([]byte, error) {
 	return data, nil
 }
 
-// List returns the names of available files.
+// List returns the names and sizes of available files.
 func (fs *FileStore) List() ([]string, error) {
 	entries, err := os.ReadDir(fs.baseDir)
 	if err != nil {
@@ -42,7 +42,12 @@ func (fs *FileStore) List() ([]string, error) {
 	var names []string
 	for _, e := range entries {
 		if !e.IsDir() {
-			names = append(names, e.Name())
+			info, err := e.Info()
+			if err != nil {
+				names = append(names, e.Name())
+			} else {
+				names = append(names, fmt.Sprintf("%s\t%d", e.Name(), info.Size()))
+			}
 		}
 	}
 	return names, nil
