@@ -2,6 +2,8 @@
 package client
 
 import (
+	"bytes"
+	"crypto/sha1"
 	"fmt"
 	"log"
 	"os"
@@ -216,7 +218,6 @@ func (c *Client) RequestFile(name string) ([]byte, error) {
 
 	result = append(result, resp.Payload...)
 
-	// Keep polling while server has more data
 	for resp.Flags&protocol.FlagMoreData != 0 {
 		resp, err = c.Poll()
 		if err != nil {
@@ -225,7 +226,21 @@ func (c *Client) RequestFile(name string) ([]byte, error) {
 		result = append(result, resp.Payload...)
 	}
 
-	return result, nil
+	// First 20 bytes are SHA1 hash from server
+	if len(result) < sha1.Size {
+		return nil, fmt.Errorf("response too short for hash verification")
+	}
+
+	serverHash := result[:sha1.Size]
+	fileData := result[sha1.Size:]
+
+	localHash := sha1.Sum(fileData)
+	if !bytes.Equal(serverHash, localHash[:]) {
+		return nil, fmt.Errorf("download hash mismatch: server=%x local=%x", serverHash, localHash)
+	}
+
+	log.Printf("download verified: %d bytes, sha1=%x", len(fileData), localHash)
+	return fileData, nil
 }
 
 // UploadFile uploads a local file to the server.
@@ -292,16 +307,28 @@ func (c *Client) UploadFile(localPath, remoteName string) error {
 		log.Printf("upload: %d/%d bytes", sent, len(data))
 	}
 
-	// Signal upload complete
+	// Signal upload complete with SHA1 hash for verification
+	hash := sha1.Sum(data)
+	hashHex := fmt.Sprintf("%x", hash)
+
+	encHash, err := c.cipher.Encrypt([]byte(hashHex))
+	if err != nil {
+		return fmt.Errorf("encrypt hash: %w", err)
+	}
+
 	pkt = &protocol.Packet{
 		Cmd:     protocol.CmdUploadDone,
 		Counter: c.nextCounter(),
+		Payload: encHash,
 	}
 	resp, err = c.sendPacket(pkt, c.clientID)
 	if err != nil {
 		return fmt.Errorf("upload done: %w", err)
 	}
 	if resp.Flags&protocol.FlagError != 0 {
+		if len(resp.Payload) > 0 {
+			return fmt.Errorf("upload verification failed: %s", resp.Payload)
+		}
 		return fmt.Errorf("server error on upload complete")
 	}
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/sha1"
 	"fmt"
 	"log"
 	"strings"
@@ -212,7 +213,7 @@ func (h *Handler) processCommand(pkt *protocol.Packet, clientID byte, src string
 	case protocol.CmdUpload:
 		return h.handleUploadStart(pkt, clientID)
 	case protocol.CmdUploadDone:
-		return h.handleUploadDone(clientID)
+		return h.handleUploadDone(pkt, clientID)
 	case protocol.CmdList:
 		return h.handleList(clientID)
 	case protocol.CmdFetch:
@@ -301,9 +302,13 @@ func (h *Handler) handleFile(pkt *protocol.Packet, clientID byte) *protocol.Resp
 		return &protocol.Response{Flags: protocol.FlagError}
 	}
 
+	// Prepend SHA1 hash (20 bytes) so client can verify integrity
+	hash := sha1.Sum(data)
+	payload := append(hash[:], data...)
+
 	// Queue the file data for streaming to the client
-	session.QueueData(data)
-	log.Printf("client %d: queued file %q (%d bytes)", clientID, filename, len(data))
+	session.QueueData(payload)
+	log.Printf("client %d: queued file %q (%d bytes, sha1=%x)", clientID, filename, len(data), hash)
 
 	// Return first chunk
 	maxPayload := h.responsePayloadSize(session)

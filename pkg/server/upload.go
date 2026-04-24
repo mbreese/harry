@@ -1,6 +1,8 @@
 package server
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -57,7 +59,7 @@ func (h *Handler) handleUploadStart(pkt *protocol.Packet, clientID byte) *protoc
 }
 
 // handleUploadDone completes the current upload.
-func (h *Handler) handleUploadDone(clientID byte) *protocol.Response {
+func (h *Handler) handleUploadDone(pkt *protocol.Packet, clientID byte) *protocol.Response {
 	session := h.sessions.Get(clientID)
 	if session == nil {
 		return &protocol.Response{Flags: protocol.FlagError}
@@ -69,12 +71,37 @@ func (h *Handler) handleUploadDone(clientID byte) *protocol.Response {
 		return &protocol.Response{Flags: protocol.FlagError}
 	}
 
-	log.Printf("client %d: upload complete: %q (%d bytes)", clientID, session.UploadFile, session.UploadBytes)
+	// Read the uploaded file and compute SHA1
+	path := filepath.Join(h.config.UploadDir, session.UploadFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("client %d: upload verify error: %v", clientID, err)
+		return &protocol.Response{Flags: protocol.FlagError}
+	}
+
+	serverHash := sha1.Sum(data)
+	serverHex := hex.EncodeToString(serverHash[:])
+
+	// Client sends SHA1 hex string in payload
+	clientHex := string(pkt.Payload)
+
+	if clientHex != serverHex {
+		log.Printf("client %d: upload hash mismatch: %q client=%s server=%s",
+			clientID, session.UploadFile, clientHex, serverHex)
+		session.UploadFile = ""
+		session.UploadBytes = 0
+		return &protocol.Response{
+			Flags:   protocol.FlagError,
+			Payload: []byte("hash mismatch"),
+		}
+	}
+
+	log.Printf("client %d: upload complete: %q (%d bytes, sha1=%s)", clientID, session.UploadFile, session.UploadBytes, serverHex)
 	session.UploadFile = ""
 	session.UploadBytes = 0
 
 	return &protocol.Response{
-		Payload: []byte("ok"),
+		Payload: []byte("ok:" + serverHex),
 	}
 }
 
