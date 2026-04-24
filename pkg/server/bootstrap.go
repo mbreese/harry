@@ -38,7 +38,8 @@ func newBootstrapCache() *bootstrapCache {
 	}
 }
 
-// getOrLoad gets a cached bootstrap file or loads and compresses it
+// getOrLoad gets a cached bootstrap file or loads and compresses it.
+// Uses a write lock for the entire load to prevent concurrent duplicate loads.
 func (bc *bootstrapCache) getOrLoad(fs *FileStore, name string) (*bootstrapFile, error) {
 	bc.mu.RLock()
 	if bf, ok := bc.files[name]; ok {
@@ -47,13 +48,20 @@ func (bc *bootstrapCache) getOrLoad(fs *FileStore, name string) (*bootstrapFile,
 	}
 	bc.mu.RUnlock()
 
-	// Load and compress
+	// Take write lock before loading to prevent duplicate work
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	// Double-check after acquiring write lock
+	if bf, ok := bc.files[name]; ok {
+		return bf, nil
+	}
+
 	data, err := fs.Get(name)
 	if err != nil {
 		return nil, err
 	}
 
-	// Gzip compress
 	var buf bytes.Buffer
 	gz, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
 	if err != nil {
@@ -65,7 +73,6 @@ func (bc *bootstrapCache) getOrLoad(fs *FileStore, name string) (*bootstrapFile,
 	compressed := buf.Bytes()
 	encoded := base64.StdEncoding.EncodeToString(compressed)
 
-	// Split into chunks
 	var chunks []string
 	for len(encoded) > 0 {
 		end := bootChunkSize
@@ -80,10 +87,7 @@ func (bc *bootstrapCache) getOrLoad(fs *FileStore, name string) (*bootstrapFile,
 		chunks:      chunks,
 		totalChunks: len(chunks),
 	}
-
-	bc.mu.Lock()
 	bc.files[name] = bf
-	bc.mu.Unlock()
 
 	log.Printf("bootstrap: cached %q: %d bytes -> %d compressed -> %d chunks",
 		name, len(data), len(compressed), len(chunks))
