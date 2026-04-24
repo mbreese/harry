@@ -2,6 +2,7 @@ package encoding
 
 import (
 	"bytes"
+	"crypto/rand"
 	"testing"
 )
 
@@ -55,6 +56,40 @@ func TestCaseInsensitive(t *testing.T) {
 	}
 	if !bytes.Equal(data, decoded) {
 		t.Fatalf("case insensitive decode failed")
+	}
+}
+
+func TestMaxDecodedSize(t *testing.T) {
+	for _, maxChars := range []int{10, 50, 100, 255, 512, 1000, 2000} {
+		maxBytes := MaxDecodedSize(maxChars)
+		if maxBytes <= 0 {
+			t.Fatalf("MaxDecodedSize(%d) = %d, expected positive", maxChars, maxBytes)
+		}
+
+		// Worst case: all 0xFF bytes produce the longest encoding
+		worstCase := make([]byte, maxBytes)
+		for i := range worstCase {
+			worstCase[i] = 0xFF
+		}
+		encoded := Encode(worstCase)
+		if len(encoded) > maxChars {
+			t.Fatalf("MaxDecodedSize(%d)=%d: worst case encoded to %d chars (over by %d)",
+				maxChars, maxBytes, len(encoded), len(encoded)-maxChars)
+		}
+
+		// Verify with random data (100 iterations)
+		for i := 0; i < 100; i++ {
+			data := make([]byte, maxBytes)
+			rand.Read(data)
+			encoded := Encode(data)
+			if len(encoded) > maxChars {
+				t.Fatalf("MaxDecodedSize(%d)=%d: random data encoded to %d chars (over by %d)",
+					maxChars, maxBytes, len(encoded), len(encoded)-maxChars)
+			}
+		}
+
+		t.Logf("MaxDecodedSize(%d) = %d bytes (worst case encodes to %d chars)",
+			maxChars, maxBytes, len(Encode(worstCase)))
 	}
 }
 

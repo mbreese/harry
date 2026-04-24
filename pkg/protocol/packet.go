@@ -16,6 +16,7 @@ package protocol
 import (
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"strings"
 
 	"github.com/mbreese/harry/pkg/encoding"
@@ -197,48 +198,66 @@ func (qc *QueryConfig) DecodeQuery(query string) (*Packet, byte, error) {
 	return pkt, clientID, nil
 }
 
-// Response represents a server response.
+// Response represents a server response (application layer).
 type Response struct {
 	Flags   byte
 	Payload []byte
 }
 
-// Marshal serializes a response.
-func (r *Response) Marshal() []byte {
-	buf := make([]byte, 1+len(r.Payload))
-	buf[0] = r.Flags
-	copy(buf[1:], r.Payload)
-	return buf
+// Frame constants for the wire format.
+const (
+	CRCSize       = 4 // CRC32
+	SeqSize       = 2 // uint16 sequence number
+	FrameOverhead = CRCSize + SeqSize + 1 // +1 for flags byte
+)
+
+// MarshalFrame builds a wire-format frame:
+//
+//	[crc32 4B] [seq 2B] [flags 1B] [encrypted_payload...]
+//
+// CRC32 covers everything after itself (seq + flags + payload).
+func MarshalFrame(seq uint16, flags byte, encryptedPayload []byte) []byte {
+	// Build inner: [seq 2B][flags 1B][encrypted_payload]
+	inner := make([]byte, SeqSize+1+len(encryptedPayload))
+	inner[0] = byte(seq >> 8)
+	inner[1] = byte(seq)
+	inner[2] = flags
+	copy(inner[3:], encryptedPayload)
+
+	// Compute CRC over inner
+	crc := crc32.ChecksumIEEE(inner)
+
+	// Build frame: [crc 4B][inner]
+	frame := make([]byte, CRCSize+len(inner))
+	frame[0] = byte(crc >> 24)
+	frame[1] = byte(crc >> 16)
+	frame[2] = byte(crc >> 8)
+	frame[3] = byte(crc)
+	copy(frame[CRCSize:], inner)
+
+	return frame
 }
 
-// UnmarshalResponse deserializes a response.
-func UnmarshalResponse(data []byte) (*Response, error) {
-	if len(data) < 1 {
-		return nil, fmt.Errorf("response too short")
+// UnmarshalFrame verifies the CRC and extracts frame components.
+// Returns an error if the CRC doesn't match (truncation/corruption).
+func UnmarshalFrame(data []byte) (seq uint16, flags byte, encryptedPayload []byte, err error) {
+	if len(data) < FrameOverhead {
+		return 0, 0, nil, fmt.Errorf("frame too short: %d bytes", len(data))
 	}
-	return &Response{
-		Flags:   data[0],
-		Payload: data[1:],
-	}, nil
-}
 
-// EncodeResponse encodes a response for a TXT record.
-func EncodeResponse(r *Response) string {
-	return encoding.Encode(r.Marshal())
-}
-
-// EncodeResponseRaw encodes raw response bytes for a TXT record.
-func EncodeResponseRaw(data []byte) string {
-	return encoding.Encode(data)
-}
-
-// DecodeResponse decodes a TXT record value into a response.
-func DecodeResponse(txt string) (*Response, error) {
-	data, err := encoding.Decode(txt)
-	if err != nil {
-		return nil, err
+	// Extract and verify CRC
+	expectedCRC := uint32(data[0])<<24 | uint32(data[1])<<16 | uint32(data[2])<<8 | uint32(data[3])
+	inner := data[CRCSize:]
+	actualCRC := crc32.ChecksumIEEE(inner)
+	if expectedCRC != actualCRC {
+		return 0, 0, nil, fmt.Errorf("CRC mismatch: expected %08x, got %08x (data corrupted or truncated)", expectedCRC, actualCRC)
 	}
-	return UnmarshalResponse(data)
+
+	seq = uint16(inner[0])<<8 | uint16(inner[1])
+	flags = inner[2]
+	encryptedPayload = inner[3:]
+
+	return seq, flags, encryptedPayload, nil
 }
 
 // clientIDToBlockLens returns the lengths of blocks 1-3 for a given client ID (0-63).

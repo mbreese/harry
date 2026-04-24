@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mbreese/harry/pkg/crypto"
+	"github.com/mbreese/harry/pkg/encoding"
 	"github.com/mbreese/harry/pkg/protocol"
 
 	"github.com/miekg/dns"
@@ -27,12 +28,13 @@ type Config struct {
 
 // Client is the DNS tunnel client.
 type Client struct {
-	config   *Config
-	cipher   *crypto.Cipher
-	qc       *protocol.QueryConfig
-	clientID byte
-	counter  uint32
-	tuneSize int // negotiated response size
+	config      *Config
+	cipher      *crypto.Cipher
+	qc          *protocol.QueryConfig
+	clientID    byte
+	counter     uint32
+	tuneSize    int    // negotiated response size
+	expectedSeq uint16 // next expected sequence number
 
 	mu sync.Mutex
 }
@@ -409,15 +411,29 @@ func (c *Client) sendPacket(pkt *protocol.Packet, clientID byte) (*protocol.Resp
 		return nil, fmt.Errorf("no TXT record in response")
 	}
 
-	// Decode response
-	resp2, err := protocol.DecodeResponse(txt)
+	// Base36 decode
+	rawData, err := encoding.Decode(txt)
 	if err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+		return nil, fmt.Errorf("base36 decode: %w", err)
 	}
 
+	// Verify CRC and extract frame components
+	seq, flags, encPayload, err := protocol.UnmarshalFrame(rawData)
+	if err != nil {
+		return nil, fmt.Errorf("response frame: %w", err)
+	}
+
+	// Verify sequence number
+	if seq != c.expectedSeq {
+		return nil, fmt.Errorf("sequence mismatch: expected %d, got %d", c.expectedSeq, seq)
+	}
+	c.expectedSeq++
+
+	resp2 := &protocol.Response{Flags: flags}
+
 	// Decrypt payload if present
-	if len(resp2.Payload) > 0 {
-		decrypted, err := c.cipher.Decrypt(resp2.Payload)
+	if len(encPayload) > 0 {
+		decrypted, err := c.cipher.Decrypt(encPayload)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt response: %w", err)
 		}

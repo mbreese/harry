@@ -96,20 +96,62 @@ func TestQueryLength(t *testing.T) {
 	}
 }
 
-func TestResponseRoundTrip(t *testing.T) {
-	resp := &Response{
-		Flags:   FlagMoreData,
-		Payload: []byte("response data here"),
-	}
+func TestFrameRoundTrip(t *testing.T) {
+	payload := []byte("encrypted data here")
+	seq := uint16(42)
+	flags := FlagMoreData
 
-	encoded := EncodeResponse(resp)
-	got, err := DecodeResponse(encoded)
+	frame := MarshalFrame(seq, flags, payload)
+	gotSeq, gotFlags, gotPayload, err := UnmarshalFrame(frame)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if got.Flags != resp.Flags || !bytes.Equal(got.Payload, resp.Payload) {
-		t.Fatalf("response round trip failed")
+	if gotSeq != seq {
+		t.Fatalf("seq mismatch: %d != %d", gotSeq, seq)
+	}
+	if gotFlags != flags {
+		t.Fatalf("flags mismatch: %d != %d", gotFlags, flags)
+	}
+	if !bytes.Equal(gotPayload, payload) {
+		t.Fatalf("payload mismatch")
+	}
+}
+
+func TestFrameEmptyPayload(t *testing.T) {
+	frame := MarshalFrame(0, 0, nil)
+	seq, flags, payload, err := UnmarshalFrame(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq != 0 || flags != 0 || len(payload) != 0 {
+		t.Fatalf("empty frame mismatch: seq=%d flags=%d payload=%x", seq, flags, payload)
+	}
+}
+
+func TestFrameCorruptionDetected(t *testing.T) {
+	frame := MarshalFrame(1, FlagMoreData, []byte("test data"))
+
+	// Flip a bit in the payload
+	corrupted := make([]byte, len(frame))
+	copy(corrupted, frame)
+	corrupted[len(corrupted)-1] ^= 0x01
+
+	_, _, _, err := UnmarshalFrame(corrupted)
+	if err == nil {
+		t.Fatal("expected CRC error on corrupted frame")
+	}
+}
+
+func TestFrameTruncationDetected(t *testing.T) {
+	frame := MarshalFrame(1, 0, []byte("test data"))
+
+	// Truncate the frame
+	truncated := frame[:len(frame)-3]
+
+	_, _, _, err := UnmarshalFrame(truncated)
+	if err == nil {
+		t.Fatal("expected CRC error on truncated frame")
 	}
 }
 

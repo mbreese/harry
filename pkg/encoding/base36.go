@@ -4,10 +4,30 @@ package encoding
 
 import (
 	"fmt"
+	"math"
 	"math/big"
 )
 
 const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+// log(36)/log(256) — how many bytes fit per base36 character
+const bytesPerChar = 0.6463623459827747
+
+// MaxDecodedSize returns the maximum number of raw bytes that,
+// when encoded with Encode, will produce a base36 string of at most maxChars.
+// Accounts for the 0x01 sentinel byte used internally by Encode.
+func MaxDecodedSize(maxChars int) int {
+	if maxChars <= 0 {
+		return 0
+	}
+	// The sentinel byte (0x01) is prepended internally, consuming encoding space.
+	// Subtract 2 bytes (1 for sentinel, 1 for safety margin on big.Int boundary).
+	raw := int(math.Floor(float64(maxChars)*bytesPerChar)) - 2
+	if raw < 0 {
+		return 0
+	}
+	return raw
+}
 
 // Encode encodes binary data to a base36 string.
 // A leading length byte is prepended to preserve leading zeros.

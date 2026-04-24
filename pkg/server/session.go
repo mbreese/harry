@@ -19,6 +19,18 @@ type Session struct {
 	// Upload state
 	UploadFile  string // current upload filename (empty = no active upload)
 	UploadBytes int    // bytes received so far
+
+	// Sequence counter for response framing
+	seqNum uint16
+}
+
+// NextSeq returns the next sequence number for this session.
+func (s *Session) NextSeq() uint16 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seq := s.seqNum
+	s.seqNum++
+	return seq
 }
 
 // QueueData appends data to the client's outbound queue.

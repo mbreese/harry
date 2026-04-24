@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mbreese/harry/pkg/crypto"
+	"github.com/mbreese/harry/pkg/encoding"
 	"github.com/mbreese/harry/pkg/protocol"
 
 	"github.com/miekg/dns"
@@ -163,10 +164,16 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	// Process command
-	resp := h.processCommand(pkt, clientID, src)
+	resp, session := h.processCommand(pkt, clientID, src)
+
+	// Get sequence number
+	var seq uint16
+	if session != nil {
+		seq = session.NextSeq()
+	}
 
 	// Encrypt response payload
-	var respData []byte
+	var encPayload []byte
 	if len(resp.Payload) > 0 {
 		encrypted, err := h.cipher.Encrypt(resp.Payload)
 		if err != nil {
@@ -175,14 +182,14 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			w.WriteMsg(msg)
 			return
 		}
-		encResp := &protocol.Response{Flags: resp.Flags, Payload: encrypted}
-		respData = encResp.Marshal()
-	} else {
-		respData = resp.Marshal()
+		encPayload = encrypted
 	}
 
+	// Build frame with CRC and sequence number
+	frameData := protocol.MarshalFrame(seq, resp.Flags, encPayload)
+
 	// Encode as TXT record
-	txt := protocol.EncodeResponseRaw(respData)
+	txt := encoding.Encode(frameData)
 
 	rr := &dns.TXT{
 		Hdr: dns.RR_Header{
@@ -197,43 +204,44 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	w.WriteMsg(msg)
 }
 
-// processCommand handles a decoded packet and returns a response.
-func (h *Handler) processCommand(pkt *protocol.Packet, clientID byte, src string) *protocol.Response {
+// processCommand handles a decoded packet and returns a response and the session.
+func (h *Handler) processCommand(pkt *protocol.Packet, clientID byte, src string) (*protocol.Response, *Session) {
 	switch pkt.Cmd {
 	case protocol.CmdConnect:
-		return h.handleConnect(src)
+		resp, session := h.handleConnect(src)
+		return resp, session
 	case protocol.CmdPoll:
-		return h.handlePoll(clientID)
+		return h.handlePoll(clientID), h.sessions.Get(clientID)
 	case protocol.CmdData:
-		return h.handleData(pkt, clientID)
+		return h.handleData(pkt, clientID), h.sessions.Get(clientID)
 	case protocol.CmdFile:
-		return h.handleFile(pkt, clientID)
+		return h.handleFile(pkt, clientID), h.sessions.Get(clientID)
 	case protocol.CmdTune:
-		return h.handleTune(pkt, clientID)
+		return h.handleTune(pkt, clientID), h.sessions.Get(clientID)
 	case protocol.CmdUpload:
-		return h.handleUploadStart(pkt, clientID)
+		return h.handleUploadStart(pkt, clientID), h.sessions.Get(clientID)
 	case protocol.CmdUploadDone:
-		return h.handleUploadDone(pkt, clientID)
+		return h.handleUploadDone(pkt, clientID), h.sessions.Get(clientID)
 	case protocol.CmdList:
-		return h.handleList(clientID)
+		return h.handleList(clientID), h.sessions.Get(clientID)
 	case protocol.CmdFetch:
-		return h.handleFetch(pkt, clientID)
+		return h.handleFetch(pkt, clientID), h.sessions.Get(clientID)
 	default:
 		log.Printf("unknown command: %c", pkt.Cmd)
-		return &protocol.Response{Flags: protocol.FlagError}
+		return &protocol.Response{Flags: protocol.FlagError}, nil
 	}
 }
 
-func (h *Handler) handleConnect(src string) *protocol.Response {
+func (h *Handler) handleConnect(src string) (*protocol.Response, *Session) {
 	session, err := h.sessions.NewSession()
 	if err != nil {
 		log.Printf("[%s] connect error: %v", src, err)
-		return &protocol.Response{Flags: protocol.FlagError}
+		return &protocol.Response{Flags: protocol.FlagError}, nil
 	}
 	log.Printf("[%s] new client connected: ID=%d", src, session.ID)
 	return &protocol.Response{
 		Payload: []byte{session.ID},
-	}
+	}, session
 }
 
 func (h *Handler) handlePoll(clientID byte) *protocol.Response {
@@ -394,25 +402,17 @@ func (h *Handler) handleTune(pkt *protocol.Packet, clientID byte) *protocol.Resp
 }
 
 // responsePayloadSize returns the max response payload in bytes,
-// accounting for encryption overhead and base36 encoding expansion.
-// The encoding is verified to fit within TuneSize by iteratively
-// reducing the payload until the encoded output fits.
+// accounting for CRC, sequence number, flags, encryption overhead,
+// and base36 encoding expansion.
 func (h *Handler) responsePayloadSize(session *Session) int {
-	overhead := h.cipher.Overhead() + 1 // +1 for flags byte
-	// Start with a conservative estimate
-	maxPayload := int(float64(session.TuneSize)/1.55) - overhead
-	if maxPayload <= 0 {
+	// How many raw bytes fit in TuneSize base36 chars?
+	rawCapacity := encoding.MaxDecodedSize(session.TuneSize)
+	// Raw layout: [crc32 4B] [seq 2B] [flags 1B] [nonce+ciphertext+tag]
+	overhead := protocol.FrameOverhead + h.cipher.Overhead()
+	if rawCapacity <= overhead {
 		return 0
 	}
-	// Verify by computing the actual encoded size and adjust down if needed.
-	// Total encoded bytes = Encode(flags(1) + encrypt(maxPayload))
-	// encrypt adds cipher.Overhead() bytes (nonce + tag).
-	// Encode ratio is ~1.55 but varies, so we subtract 2 as safety margin.
-	maxPayload -= 2
-	if maxPayload <= 0 {
-		return 0
-	}
-	return maxPayload
+	return rawCapacity - overhead
 }
 
 // splitTXT splits a string into 255-char chunks for DNS TXT records.
