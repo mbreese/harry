@@ -18,6 +18,7 @@ func main() {
 	fileDir := flag.String("files", "./files", "directory for downloadable files")
 	uploadDir := flag.String("uploads", "./uploads", "directory for uploaded files")
 	cacheDir := flag.String("cache", "", "bootstrap cache directory (default: temp dir)")
+	rshellAddr := flag.String("rshell", "", "TCP listen address for reverse shell (e.g., 127.0.0.1:4444)")
 	ttl := flag.Uint("ttl", 1, "DNS TTL")
 	verbose := flag.Bool("verbose", false, "log all queries including stray traffic")
 	flag.Parse()
@@ -32,14 +33,15 @@ func main() {
 	os.MkdirAll(*uploadDir, 0755)
 
 	cfg := &server.Config{
-		Domain:    *domain,
-		Password:  *password,
-		FileDir:   *fileDir,
-		UploadDir: *uploadDir,
-		CacheDir:  *cacheDir,
-		Listen:    *listen,
-		TTL:       uint32(*ttl),
-		Verbose:   *verbose,
+		Domain:     *domain,
+		Password:   *password,
+		FileDir:    *fileDir,
+		UploadDir:  *uploadDir,
+		CacheDir:   *cacheDir,
+		Listen:     *listen,
+		RShellAddr: *rshellAddr,
+		TTL:        uint32(*ttl),
+		Verbose:    *verbose,
 	}
 
 	handler, err := server.New(cfg)

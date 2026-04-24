@@ -22,6 +22,7 @@ Commands:
   recv <remote> [local]      Receive a file from the server (local=- for stdout)
   list                       List available files on the server
   fetch <url>                Fetch a URL via the server (stdout)
+  rshell                     Reverse shell (expose local shell to server)
   pipe                       Bidirectional stdin/stdout tunnel
   poll                       Poll for data (testing)
 
@@ -160,6 +161,11 @@ func main() {
 		}
 		for _, f := range files {
 			fmt.Println(f)
+		}
+
+	case "rshell":
+		if err := c.StartRShell(*pollInterval); err != nil {
+			log.Fatalf("rshell failed: %v", err)
 		}
 
 	case "pipe":

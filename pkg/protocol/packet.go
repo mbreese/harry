@@ -34,6 +34,7 @@ const (
 	CmdTune       byte = 't' // Auto-tune response size confirmation
 	CmdList       byte = 'l' // List available files
 	CmdFetch      byte = 'h' // Fetch a URL (server proxies HTTP request)
+	CmdRShell     byte = 'r' // Start reverse shell (client spawns shell)
 )
 
 // Response flags
