@@ -28,6 +28,7 @@ type Config struct {
 	Password  string // shared secret
 	FileDir   string // directory for downloadable files
 	UploadDir string // directory for uploaded files
+	CacheDir  string // directory for bootstrap cache (empty = temp dir)
 	Listen    string // listen address (e.g., ":53")
 	TTL       uint32 // DNS TTL (default 1)
 	Verbose   bool   // log all queries including stray traffic
@@ -50,7 +51,7 @@ func New(cfg *Config) (*Handler, error) {
 		files:     NewFileStore(cfg.FileDir),
 		cipher:    c,
 		qc:        &protocol.QueryConfig{Domain: cfg.Domain},
-		bootCache: newBootstrapCache(),
+		bootCache: newBootstrapCache(cfg.CacheDir),
 	}, nil
 }
 

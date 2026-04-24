@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -13,59 +15,80 @@ import (
 )
 
 const (
-	// Each TXT string can be up to 255 bytes. We pack multiple strings per
-	// response for larger chunks. Using 253 chars per string * 3 strings
-	// gives us ~759 chars of base64 per chunk (~569 raw bytes).
-	bootTXTStringSize   = 253
-	bootStringsPerChunk = 3
-	bootChunkSize       = bootTXTStringSize * bootStringsPerChunk
+	// Each chunk is one TXT string (max 253 chars to stay safe).
+	bootChunkSize = 253
 )
 
-// bootstrapCache caches compressed+chunked file data
+// bootstrapCache stores compressed+chunked files on disk.
 type bootstrapCache struct {
-	mu    sync.RWMutex
-	files map[string]*bootstrapFile
+	mu      sync.RWMutex
+	dir     string            // tmp directory for chunk files
+	files   map[string]int    // filename -> total chunks
 }
 
-type bootstrapFile struct {
-	chunks      []string // base64 encoded chunks
-	totalChunks int
-}
-
-func newBootstrapCache() *bootstrapCache {
+func newBootstrapCache(dir string) *bootstrapCache {
+	if dir == "" {
+		var err error
+		dir, err = os.MkdirTemp("", "harry-boot-*")
+		if err != nil {
+			log.Fatalf("failed to create bootstrap cache dir: %v", err)
+		}
+	} else {
+		os.MkdirAll(dir, 0755)
+	}
+	log.Printf("bootstrap cache: %s", dir)
 	return &bootstrapCache{
-		files: make(map[string]*bootstrapFile),
+		dir:   dir,
+		files: make(map[string]int),
 	}
 }
 
-// getOrLoad gets a cached bootstrap file or loads and compresses it.
-// Uses a write lock for the entire load to prevent concurrent duplicate loads.
-func (bc *bootstrapCache) getOrLoad(fs *FileStore, name string) (*bootstrapFile, error) {
-	bc.mu.RLock()
-	if bf, ok := bc.files[name]; ok {
-		bc.mu.RUnlock()
-		return bf, nil
-	}
-	bc.mu.RUnlock()
+// chunkPath returns the path for a specific chunk file.
+func (bc *bootstrapCache) chunkPath(name string, idx int) string {
+	return filepath.Join(bc.dir, fmt.Sprintf("%s.%d", name, idx))
+}
 
-	// Take write lock before loading to prevent duplicate work
+// totalChunks returns the number of chunks for a file, or 0 if not cached.
+func (bc *bootstrapCache) totalChunks(name string) (int, bool) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	n, ok := bc.files[name]
+	return n, ok
+}
+
+// getChunk reads a single chunk from disk.
+func (bc *bootstrapCache) getChunk(name string, idx int) (string, error) {
+	data, err := os.ReadFile(bc.chunkPath(name, idx))
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// ensureLoaded loads and caches a file if not already cached.
+func (bc *bootstrapCache) ensureLoaded(fs *FileStore, name string) (int, error) {
+	if n, ok := bc.totalChunks(name); ok {
+		return n, nil
+	}
+
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 
-	// Double-check after acquiring write lock
-	if bf, ok := bc.files[name]; ok {
-		return bf, nil
+	// Double-check
+	if n, ok := bc.files[name]; ok {
+		return n, nil
 	}
 
 	data, err := fs.Get(name)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 
+	// Gzip compress
 	var buf bytes.Buffer
 	gz, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	gz.Write(data)
 	gz.Close()
@@ -73,33 +96,36 @@ func (bc *bootstrapCache) getOrLoad(fs *FileStore, name string) (*bootstrapFile,
 	compressed := buf.Bytes()
 	encoded := base64.StdEncoding.EncodeToString(compressed)
 
-	var chunks []string
+	// Write chunks to disk
+	idx := 0
 	for len(encoded) > 0 {
 		end := bootChunkSize
 		if end > len(encoded) {
 			end = len(encoded)
 		}
-		chunks = append(chunks, encoded[:end])
+		chunk := encoded[:end]
 		encoded = encoded[end:]
+
+		if err := os.WriteFile(bc.chunkPath(name, idx), []byte(chunk), 0600); err != nil {
+			return 0, fmt.Errorf("writing chunk %d: %w", idx, err)
+		}
+		idx++
 	}
 
-	bf := &bootstrapFile{
-		chunks:      chunks,
-		totalChunks: len(chunks),
-	}
-	bc.files[name] = bf
+	bc.files[name] = idx
 
-	log.Printf("bootstrap: cached %q: %d bytes -> %d compressed -> %d chunks",
-		name, len(data), len(compressed), len(chunks))
+	log.Printf("bootstrap: cached %q to disk: %d bytes -> %d compressed -> %d chunks",
+		name, len(data), len(compressed), idx)
 
-	return bf, nil
+	return idx, nil
 }
 
 // handleBootstrap handles plaintext bootstrap DNS requests.
 //
 // Two-stage bootstrap:
 //   - boot.<domain>                    → stage 1: tiny script that fetches stage 2
-//   - <n>.s.boot.<domain>              → stage 2 script chunks (full download logic)
+//   - boothelp.<domain>               → human-readable instructions
+//   - <n>.s.boot.<domain>              → stage 2 script chunks
 //
 // File serving:
 //   - n.<filename>.boot.<domain>       → number of chunks for a file
@@ -116,7 +142,6 @@ func (h *Handler) handleBootstrap(qname, domain string, q *dns.Question, msg *dn
 
 	switch {
 	case len(parts) == 1 && parts[0] == "boot":
-		// Stage 1: tiny loader that fetches and evals stage 2
 		script := h.stage1Script()
 		msg.Answer = append(msg.Answer, &dns.TXT{
 			Hdr: dns.RR_Header{
@@ -125,12 +150,11 @@ func (h *Handler) handleBootstrap(qname, domain string, q *dns.Question, msg *dn
 				Class:  dns.ClassINET,
 				Ttl:    300,
 			},
-			Txt: []string{script}, // must fit in one TXT string
+			Txt: []string{script},
 		})
 		return true
 
 	case len(parts) == 1 && parts[0] == "boothelp":
-		// Human-readable bootstrap instructions
 		help := h.bootstrapHelp()
 		msg.Answer = append(msg.Answer, &dns.TXT{
 			Hdr: dns.RR_Header{
@@ -144,11 +168,9 @@ func (h *Handler) handleBootstrap(qname, domain string, q *dns.Question, msg *dn
 		return true
 
 	case len(parts) == 3 && parts[1] == "s" && parts[2] == "boot":
-		// Stage 2 script chunks: <n>.s.boot.<domain>
 		return h.handleStage2Chunk(parts[0], q, msg)
 
 	case len(parts) == 3 && parts[2] == "boot":
-		// File chunks: <chunk-id>.<filename>.boot.<domain>
 		return h.handleBootstrapChunk(parts[0], parts[1], q, msg)
 
 	default:
@@ -165,9 +187,6 @@ func (h *Handler) bootstrapHelp() string {
 }
 
 // stage1Script returns a tiny script (<255 chars) that fetches and evals stage 2.
-// Usage: dig +short TXT boot.<domain> | xargs echo | sh
-// IMPORTANT: No double quotes allowed - dig would escape them, breaking xargs.
-// Uses system default resolver (no @). Dig resolves via /etc/resolv.conf.
 func (h *Handler) stage1Script() string {
 	return fmt.Sprintf(
 		`i=0;S=;while :;do C=$(dig +short TXT $i.s.boot.%s|xargs);case $C in ?*)S=${S}$C;i=$((i+1));;*)break;;esac;done;eval $S`,
@@ -175,10 +194,8 @@ func (h *Handler) stage1Script() string {
 	)
 }
 
-// stage2Script returns the full download script (can be any length, served in chunks).
-// IMPORTANT: No double quotes allowed - chunks go through xargs which can't handle escaped quotes.
-// Uses sed to strip non-data characters instead of xargs (avoids quoting issues in eval context).
-// Uses system default resolver (no @).
+// stage2Script returns the full download script.
+// No double quotes allowed - chunks go through xargs.
 func (h *Handler) stage2Script() string {
 	return fmt.Sprintf(`D=%s;O=$(uname -s|tr A-Z a-z);A=$(uname -m);case $A in x86_64)A=amd64;;aarch64)A=arm64;;esac;F=harry-$O-$A;echo downloading $F;N=$(dig +short TXT n.$F.boot.$D|head -1|sed s/[^0-9]//g);echo $N chunks;i=0;B=;while [ $i -lt $N ];do C=$(dig +short TXT $i.$F.boot.$D|sed s/[^A-Za-z0-9+/=]//g);B=${B}$C;i=$((i+1));case $((i%%100)) in 0)echo $i/$N;;esac;done;echo;printf %%s $B|base64 -d|gunzip>harry;chmod +x harry;echo done`,
 		h.config.Domain)
@@ -209,7 +226,6 @@ func (h *Handler) handleStage2Chunk(idxStr string, q *dns.Question, msg *dns.Msg
 	}
 
 	if idx < 0 || idx >= len(chunks) {
-		// Return empty response (signals end of script to stage 1)
 		msg.Answer = append(msg.Answer, &dns.TXT{
 			Hdr: dns.RR_Header{
 				Name:   q.Name,
@@ -235,7 +251,7 @@ func (h *Handler) handleStage2Chunk(idxStr string, q *dns.Question, msg *dns.Msg
 }
 
 func (h *Handler) handleBootstrapChunk(chunkID, filename string, q *dns.Question, msg *dns.Msg) bool {
-	bf, err := h.bootCache.getOrLoad(h.files, filename)
+	totalChunks, err := h.bootCache.ensureLoaded(h.files, filename)
 	if err != nil {
 		log.Printf("bootstrap: file %q not found: %v", filename, err)
 		msg.Rcode = dns.RcodeNameError
@@ -250,7 +266,7 @@ func (h *Handler) handleBootstrapChunk(chunkID, filename string, q *dns.Question
 				Class:  dns.ClassINET,
 				Ttl:    300,
 			},
-			Txt: []string{fmt.Sprintf("%d", bf.totalChunks)},
+			Txt: []string{fmt.Sprintf("%d", totalChunks)},
 		})
 		return true
 	}
@@ -262,9 +278,16 @@ func (h *Handler) handleBootstrapChunk(chunkID, filename string, q *dns.Question
 		return true
 	}
 
-	if idx < 0 || idx >= bf.totalChunks {
-		log.Printf("bootstrap: chunk %d out of range (0-%d)", idx, bf.totalChunks-1)
+	if idx < 0 || idx >= totalChunks {
+		log.Printf("bootstrap: chunk %d out of range (0-%d)", idx, totalChunks-1)
 		msg.Rcode = dns.RcodeNameError
+		return true
+	}
+
+	chunk, err := h.bootCache.getChunk(filename, idx)
+	if err != nil {
+		log.Printf("bootstrap: error reading chunk %d: %v", idx, err)
+		msg.Rcode = dns.RcodeServerFailure
 		return true
 	}
 
@@ -275,7 +298,7 @@ func (h *Handler) handleBootstrapChunk(chunkID, filename string, q *dns.Question
 			Class:  dns.ClassINET,
 			Ttl:    300,
 		},
-		Txt: splitTXT(bf.chunks[idx]),
+		Txt: splitTXT(chunk),
 	})
 	return true
 }
