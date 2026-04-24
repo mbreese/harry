@@ -34,6 +34,7 @@ func main() {
 	resolver := flag.String("resolver", "", "DNS resolver (host:port, default: system resolver)")
 	pollInterval := flag.Duration("poll", 30*time.Second, "idle poll interval")
 	noRedirect := flag.Bool("no-redirect", false, "don't follow HTTP redirects (for fetch)")
+	force := flag.Bool("f", false, "force overwrite existing file (for upload)")
 	output := flag.String("o", "", "output file (for fetch/download, default: stdout)")
 	rcFile := flag.String("rc", "", "RC file path (default: ~/.harryrc)")
 
@@ -115,7 +116,11 @@ func main() {
 		if len(cmdArgs) >= 2 {
 			remoteName = cmdArgs[1]
 		}
-		if err := c.UploadFile(localPath, remoteName); err != nil {
+		var uploadFlags byte
+		if *force {
+			uploadFlags |= client.UploadForce
+		}
+		if err := c.UploadFile(localPath, remoteName, uploadFlags); err != nil {
 			log.Fatalf("upload failed: %v", err)
 		}
 

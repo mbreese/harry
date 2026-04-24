@@ -12,7 +12,12 @@ import (
 	"github.com/mbreese/harry/pkg/protocol"
 )
 
+const (
+	uploadFlagForce byte = 1 << 0 // Overwrite existing file
+)
+
 // handleUploadStart begins a new file upload.
+// Payload format: [flags 1B][filename...]
 // Idempotent: if the session already has an upload for the same file, just ACK.
 func (h *Handler) handleUploadStart(pkt *protocol.Packet, clientID byte) *protocol.Frame {
 	session := h.sessions.Get(clientID)
@@ -26,7 +31,13 @@ func (h *Handler) handleUploadStart(pkt *protocol.Packet, clientID byte) *protoc
 		return errorFrame()
 	}
 
-	filename := string(pkt.Payload)
+	if len(pkt.Payload) < 2 {
+		log.Printf("client %d: upload rejected, payload too short", clientID)
+		return errorFrame()
+	}
+
+	flags := pkt.Payload[0]
+	filename := string(pkt.Payload[1:])
 	if filename == "" {
 		log.Printf("client %d: upload rejected, empty filename", clientID)
 		return errorFrame()
@@ -44,6 +55,18 @@ func (h *Handler) handleUploadStart(pkt *protocol.Packet, clientID byte) *protoc
 	}
 
 	path := filepath.Join(h.config.UploadDir, clean)
+
+	// Check if file already exists
+	if flags&uploadFlagForce == 0 {
+		if _, err := os.Stat(path); err == nil {
+			log.Printf("client %d: upload rejected, file exists: %q (use -f to overwrite)", clientID, clean)
+			return &protocol.Frame{
+				Flags:   protocol.FlagError,
+				Payload: []byte("file exists (use -f to overwrite)"),
+			}
+		}
+	}
+
 	f, err := os.Create(path)
 	if err != nil {
 		log.Printf("client %d: upload create error: %v", clientID, err)

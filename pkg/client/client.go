@@ -273,15 +273,21 @@ func (c *Client) RequestFile(name string) ([]byte, error) {
 	return fileData, nil
 }
 
+// UploadFlags controls upload behavior.
+const (
+	UploadForce byte = 1 << 0 // Overwrite existing file
+)
+
 // UploadFile uploads a local file to the server.
-func (c *Client) UploadFile(localPath, remoteName string) error {
+func (c *Client) UploadFile(localPath, remoteName string, flags byte) error {
 	data, err := os.ReadFile(localPath)
 	if err != nil {
 		return fmt.Errorf("reading file: %w", err)
 	}
 
-	// Start upload
-	encName, err := c.cipher.Encrypt([]byte(remoteName))
+	// Start upload: payload = [flags 1B][filename...]
+	uploadPayload := append([]byte{flags}, []byte(remoteName)...)
+	encPayload, err := c.cipher.Encrypt(uploadPayload)
 	if err != nil {
 		return fmt.Errorf("encrypt filename: %w", err)
 	}
@@ -289,7 +295,7 @@ func (c *Client) UploadFile(localPath, remoteName string) error {
 	pkt := &protocol.Packet{
 		Cmd:     protocol.CmdUpload,
 		Counter: c.nextCounter(),
-		Payload: encName,
+		Payload: encPayload,
 	}
 
 	frame, err := c.sendPacket(pkt, c.clientID)
