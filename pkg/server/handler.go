@@ -356,7 +356,27 @@ func (h *Handler) handleData(pkt *protocol.Packet, clientID byte) *protocol.Fram
 		log.Printf("client %d: received %d bytes upstream (no handler)", clientID, len(pkt.Payload))
 	}
 
-	// ACK the upload chunk
+	// Piggyback any buffered downstream data on the response.
+	// This avoids an extra poll round-trip for SOCKS5/rshell.
+	if session.Socks5 != nil {
+		maxPayload := h.responsePayloadSize(session)
+		data, more := session.Socks5.readFromStreams(maxPayload)
+		flags := byte(0)
+		if more {
+			flags |= protocol.FlagMoreData
+		}
+		return &protocol.Frame{Flags: flags, Payload: data}
+	}
+	if session.RShell != nil {
+		maxPayload := h.responsePayloadSize(session)
+		data, more := session.RShell.ReadFromTCP(maxPayload)
+		flags := byte(0)
+		if more {
+			flags |= protocol.FlagMoreData
+		}
+		return &protocol.Frame{Flags: flags, Payload: data}
+	}
+
 	return &protocol.Frame{}
 }
 
