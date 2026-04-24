@@ -28,13 +28,15 @@ type Session struct {
 	// SOCKS5 proxy bridge
 	Socks5 *socks5Bridge
 
-	// Deduplication: track seen request counters to detect DNS retries.
-	// DNS resolvers may retry any request, and retries can arrive
-	// out of order (after newer requests have been processed).
-	seenCounters map[uint32]bool
+	// Deduplication: cache responses by request counter.
+	// DNS resolvers may retry requests or send to multiple upstreams.
+	// If we see the same counter again, return the cached response.
+	responseCache map[uint32][]byte // counter → wire-format response
+	seenCounters  map[uint32]bool
 }
 
 // isDuplicate returns true if this request counter was already processed.
+// Used for state-mutating commands (data, upload) to prevent side effects.
 func (s *Session) isDuplicate(counter uint32) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -45,9 +47,6 @@ func (s *Session) isDuplicate(counter uint32) bool {
 		return true
 	}
 	s.seenCounters[counter] = true
-	// Keep the map from growing unbounded — prune old entries
-	// when it gets large. Counters are monotonically increasing,
-	// so anything more than 1000 behind the current is safe to drop.
 	if len(s.seenCounters) > 2000 {
 		threshold := counter - 1000
 		for k := range s.seenCounters {
@@ -57,6 +56,35 @@ func (s *Session) isDuplicate(counter uint32) bool {
 		}
 	}
 	return false
+}
+
+// CacheResponse stores the wire-format response for a request counter.
+func (s *Session) CacheResponse(counter uint32, wireData []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.responseCache == nil {
+		s.responseCache = make(map[uint32][]byte)
+	}
+	s.responseCache[counter] = wireData
+	// Prune old entries
+	if len(s.responseCache) > 200 {
+		threshold := counter - 100
+		for k := range s.responseCache {
+			if k < threshold {
+				delete(s.responseCache, k)
+			}
+		}
+	}
+}
+
+// GetCachedResponse returns a previously cached response, or nil if not found.
+func (s *Session) GetCachedResponse(counter uint32) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.responseCache == nil {
+		return nil
+	}
+	return s.responseCache[counter]
 }
 
 // SessionManager manages client sessions.

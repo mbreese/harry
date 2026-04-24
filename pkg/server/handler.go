@@ -212,6 +212,31 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			src, clientID, pkt.Cmd, pkt.Counter, len(pkt.Payload))
 	}
 
+	// Check response cache — DNS resolvers may send the same query to
+	// multiple upstreams, causing duplicate processing. Return cached
+	// response for duplicate requests.
+	session := h.sessions.Get(clientID)
+	if session != nil {
+		if cached := session.GetCachedResponse(pkt.Counter); cached != nil {
+			if h.config.Verbose {
+				log.Printf("[%s] dedup client=%d counter=%d (cached response)", src, clientID, pkt.Counter)
+			}
+			txt := encoding.Encode(cached)
+			rr := &dns.TXT{
+				Hdr: dns.RR_Header{
+					Name:   q.Name,
+					Rrtype: dns.TypeTXT,
+					Class:  dns.ClassINET,
+					Ttl:    h.config.TTL,
+				},
+				Txt: splitTXT(txt),
+			}
+			msg.Answer = append(msg.Answer, rr)
+			w.WriteMsg(msg)
+			return
+		}
+	}
+
 	// Process command — returns a frame ready for encoding
 	frame := h.processCommand(pkt, clientID, src)
 
@@ -230,10 +255,15 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	// Build wire frame with CRC and encode as TXT record
 	wireFrame := protocol.MarshalFrame(frame)
+
+	// Cache the response for deduplication
+	if session != nil {
+		session.CacheResponse(pkt.Counter, wireFrame)
+	}
+
 	txt := encoding.Encode(wireFrame)
 
 	if h.config.Verbose {
-		// Extract CRC from wire frame for logging
 		var crc uint32
 		if len(wireFrame) >= 4 {
 			crc = uint32(wireFrame[0])<<24 | uint32(wireFrame[1])<<16 | uint32(wireFrame[2])<<8 | uint32(wireFrame[3])
