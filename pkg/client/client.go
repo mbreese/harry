@@ -9,6 +9,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 	"strings"
 	"sync"
 	"time"
@@ -207,6 +209,16 @@ func (c *Client) StartRShell(pollInterval time.Duration) error {
 	}
 
 	log.Printf("rshell: local shell started (pid %d)", shell.Process.Pid)
+
+	// Handle Ctrl-C gracefully
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Printf("rshell: interrupted, killing shell")
+		shell.Process.Kill()
+	}()
+	defer signal.Stop(sigCh)
 
 	// Read shell output in background
 	shellCh := make(chan []byte, 16)

@@ -25,6 +25,9 @@ type Session struct {
 	// Reverse shell bridge
 	RShell *rshellBridge
 
+	// SOCKS5 proxy bridge
+	Socks5 *socks5Bridge
+
 	// Deduplication: track seen request counters to detect DNS retries.
 	// DNS resolvers may retry any request, and retries can arrive
 	// out of order (after newer requests have been processed).

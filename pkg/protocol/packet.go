@@ -33,8 +33,11 @@ const (
 	CmdUploadDone byte = 'U' // Signal upload complete
 	CmdTune       byte = 't' // Auto-tune response size confirmation
 	CmdList       byte = 'l' // List available files
-	CmdFetch      byte = 'h' // Fetch a URL (server proxies HTTP request)
-	CmdRShell     byte = 'r' // Start reverse shell (client spawns shell)
+	CmdFetch       byte = 'h' // Fetch a URL (server proxies HTTP request)
+	CmdRShell      byte = 'r' // Start reverse shell (client spawns shell)
+	CmdSocks5      byte = 's' // Start SOCKS5 proxy mode
+	CmdStreamOpen  byte = 'o' // Open a new stream: [stream_id 2B][addr_type 1B][addr...][port 2B]
+	CmdStreamClose byte = 'x' // Close a stream: [stream_id 2B]
 )
 
 // Response flags

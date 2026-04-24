@@ -34,6 +34,14 @@ func (h *Handler) handleRShell(pkt *protocol.Packet, clientID byte) *protocol.Fr
 		}
 	}
 
+	// Close any existing rshell bridge for this session
+	session.mu.Lock()
+	if session.RShell != nil {
+		session.RShell.Close()
+		session.RShell = nil
+	}
+	session.mu.Unlock()
+
 	// Start the TCP listener
 	listener, err := net.Listen("tcp", h.config.RShellAddr)
 	if err != nil {
