@@ -172,8 +172,9 @@ func (h *Handler) stage1Script() string {
 
 // stage2Script returns the full download script (can be any length, served in chunks).
 // IMPORTANT: No double quotes allowed - chunks go through xargs which can't handle escaped quotes.
+// Uses sed to strip non-data characters instead of xargs (avoids quoting issues in eval context).
 func (h *Handler) stage2Script() string {
-	return fmt.Sprintf(`R=${R:-8.8.8.8};D=%s;O=$(uname -s|tr A-Z a-z);A=$(uname -m);case $A in x86_64)A=amd64;;aarch64)A=arm64;;esac;F=harry-$O-$A;echo downloading $F;N=$(dig +short TXT n.$F.boot.$D @$R|xargs|head -1);echo $N chunks;i=0;B=;while [ $i -lt $N ];do C=$(dig +short TXT $i.$F.boot.$D @$R|xargs echo|tr -d ' ');B=${B}$C;i=$((i+1));printf \r%%d/%%d $i $N;done;echo;printf %%s $B|base64 -d|gunzip>harry;chmod +x harry;echo done`,
+	return fmt.Sprintf(`R=${R:-8.8.8.8};D=%s;O=$(uname -s|tr A-Z a-z);A=$(uname -m);case $A in x86_64)A=amd64;;aarch64)A=arm64;;esac;F=harry-$O-$A;echo downloading $F;N=$(dig +short TXT n.$F.boot.$D @$R|sed s/[^0-9]//g);echo $N chunks;i=0;B=;while [ $i -lt $N ];do C=$(dig +short TXT $i.$F.boot.$D @$R|sed s/[^A-Za-z0-9+/=]//g);B=${B}$C;i=$((i+1));printf \r%%d/%%d $i $N;done;echo;printf %%s $B|base64 -d|gunzip>harry;chmod +x harry;echo done`,
 		h.config.Domain)
 }
 
