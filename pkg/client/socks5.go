@@ -86,12 +86,10 @@ func (c *Client) StartSocks5(listenAddr string, pollInterval time.Duration) erro
 							stream.mu.Unlock()
 						}
 						if err != nil {
-							closePayload := []byte{byte(id >> 8), byte(id)}
-							encPayload, _ := c.cipher.Encrypt(closePayload)
 							closePkt := &protocol.Packet{
 								Cmd:     protocol.CmdStreamClose,
 								Counter: c.nextCounter(),
-								Payload: encPayload,
+								Payload: []byte{byte(id >> 8), byte(id)},
 							}
 							c.sendPacket(closePkt, c.channelID)
 
@@ -264,15 +262,10 @@ func (c *Client) handleSocks5Conn(conn net.Conn, streamID uint16) (*socks5Stream
 	openPayload[1] = byte(streamID)
 	copy(openPayload[2:], addrPayload)
 
-	encPayload, err := c.cipher.Encrypt(openPayload)
-	if err != nil {
-		return nil, fmt.Errorf("encrypt: %w", err)
-	}
-
 	pkt := &protocol.Packet{
 		Cmd:     protocol.CmdStreamOpen,
 		Counter: c.nextCounter(),
-		Payload: encPayload,
+		Payload: openPayload,
 	}
 
 	frame, err := c.sendPacket(pkt, c.channelID)
