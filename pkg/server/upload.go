@@ -17,7 +17,7 @@ const (
 )
 
 // handleUploadStart begins a new file upload.
-// Payload format: [flags 1B][filename...]
+// Payload format: [flags 1B][size 4B big-endian][sha1 20B][filename...]
 // Idempotent: if the session already has an upload for the same file, just ACK.
 func (h *Handler) handleUploadStart(pkt *protocol.Packet, clientID byte) *protocol.Frame {
 	session := h.sessions.Get(clientID)
@@ -31,13 +31,19 @@ func (h *Handler) handleUploadStart(pkt *protocol.Packet, clientID byte) *protoc
 		return errorFrame()
 	}
 
-	if len(pkt.Payload) < 2 {
+	// Parse payload: [flags 1B][size 4B][sha1 20B][filename...]
+	if len(pkt.Payload) < 1+4+20+1 {
 		log.Printf("client %d: upload rejected, payload too short", clientID)
 		return errorFrame()
 	}
 
 	flags := pkt.Payload[0]
-	filename := string(pkt.Payload[1:])
+	expSize := uint32(pkt.Payload[1])<<24 | uint32(pkt.Payload[2])<<16 |
+		uint32(pkt.Payload[3])<<8 | uint32(pkt.Payload[4])
+	var expHash [20]byte
+	copy(expHash[:], pkt.Payload[5:25])
+	filename := string(pkt.Payload[25:])
+
 	if filename == "" {
 		log.Printf("client %d: upload rejected, empty filename", clientID)
 		return errorFrame()
@@ -76,12 +82,17 @@ func (h *Handler) handleUploadStart(pkt *protocol.Packet, clientID byte) *protoc
 
 	session.UploadFile = clean
 	session.UploadBytes = 0
-	log.Printf("client %d: upload started: %q", clientID, clean)
+	session.UploadExpSize = expSize
+	session.UploadExpHash = expHash
+	log.Printf("client %d: upload started: %q (expecting %d bytes, sha1=%x)",
+		clientID, clean, expSize, expHash)
 
 	return &protocol.Frame{Payload: []byte("ok")}
 }
 
-// handleUploadDone completes the current upload.
+// handleUploadDone is called when the client signals upload complete.
+// The server verifies the file against the expected size and SHA1
+// sent in the upload start.
 func (h *Handler) handleUploadDone(pkt *protocol.Packet, clientID byte) *protocol.Frame {
 	session := h.sessions.Get(clientID)
 	if session == nil {
@@ -89,7 +100,6 @@ func (h *Handler) handleUploadDone(pkt *protocol.Packet, clientID byte) *protoco
 	}
 	session.LastSeen = now()
 
-	// Deduplicate DNS retries
 	if session.isDuplicate(pkt.Counter) {
 		return &protocol.Frame{Payload: []byte("ok")}
 	}
@@ -99,6 +109,7 @@ func (h *Handler) handleUploadDone(pkt *protocol.Packet, clientID byte) *protoco
 		return errorFrame()
 	}
 
+	// Read the uploaded file and verify
 	path := filepath.Join(h.config.UploadDir, session.UploadFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -108,20 +119,33 @@ func (h *Handler) handleUploadDone(pkt *protocol.Packet, clientID byte) *protoco
 
 	serverHash := sha1.Sum(data)
 	serverHex := hex.EncodeToString(serverHash[:])
-	clientHex := string(pkt.Payload)
 
-	if clientHex != serverHex {
-		log.Printf("client %d: upload hash mismatch: %q client=%s server=%s",
-			clientID, session.UploadFile, clientHex, serverHex)
+	if serverHash != session.UploadExpHash {
+		expHex := hex.EncodeToString(session.UploadExpHash[:])
+		log.Printf("client %d: upload hash mismatch: %q expected=%s got=%s",
+			clientID, session.UploadFile, expHex, serverHex)
 		session.UploadFile = ""
 		session.UploadBytes = 0
 		return &protocol.Frame{
 			Flags:   protocol.FlagError,
-			Payload: []byte("hash mismatch"),
+			Payload: []byte(fmt.Sprintf("hash mismatch: expected=%s got=%s",
+				hex.EncodeToString(session.UploadExpHash[:]), serverHex)),
 		}
 	}
 
-	log.Printf("client %d: upload complete: %q (%d bytes, sha1=%s)", clientID, session.UploadFile, session.UploadBytes, serverHex)
+	if uint32(len(data)) != session.UploadExpSize {
+		log.Printf("client %d: upload size mismatch: %q expected=%d got=%d",
+			clientID, session.UploadFile, session.UploadExpSize, len(data))
+		session.UploadFile = ""
+		session.UploadBytes = 0
+		return &protocol.Frame{
+			Flags:   protocol.FlagError,
+			Payload: []byte("size mismatch"),
+		}
+	}
+
+	log.Printf("client %d: upload verified: %q (%d bytes, sha1=%s)",
+		clientID, session.UploadFile, len(data), serverHex)
 	session.UploadFile = ""
 	session.UploadBytes = 0
 

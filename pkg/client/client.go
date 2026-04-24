@@ -285,11 +285,23 @@ func (c *Client) UploadFile(localPath, remoteName string, flags byte) error {
 		return fmt.Errorf("reading file: %w", err)
 	}
 
-	// Start upload: payload = [flags 1B][filename...]
-	uploadPayload := append([]byte{flags}, []byte(remoteName)...)
+	// Compute SHA1 upfront
+	hash := sha1.Sum(data)
+	size := uint32(len(data))
+
+	// Start upload: payload = [flags 1B][size 4B][sha1 20B][filename...]
+	uploadPayload := make([]byte, 1+4+20+len(remoteName))
+	uploadPayload[0] = flags
+	uploadPayload[1] = byte(size >> 24)
+	uploadPayload[2] = byte(size >> 16)
+	uploadPayload[3] = byte(size >> 8)
+	uploadPayload[4] = byte(size)
+	copy(uploadPayload[5:25], hash[:])
+	copy(uploadPayload[25:], remoteName)
+
 	encPayload, err := c.cipher.Encrypt(uploadPayload)
 	if err != nil {
-		return fmt.Errorf("encrypt filename: %w", err)
+		return fmt.Errorf("encrypt upload header: %w", err)
 	}
 
 	pkt := &protocol.Packet{
@@ -345,19 +357,10 @@ func (c *Client) UploadFile(localPath, remoteName string, flags byte) error {
 	}
 	fmt.Fprintf(os.Stderr, "\n")
 
-	// Signal upload complete with SHA1 hash for verification
-	hash := sha1.Sum(data)
-	hashHex := fmt.Sprintf("%x", hash)
-
-	encHash, err := c.cipher.Encrypt([]byte(hashHex))
-	if err != nil {
-		return fmt.Errorf("encrypt hash: %w", err)
-	}
-
+	// Signal upload complete — server verifies against hash/size from upload start
 	pkt = &protocol.Packet{
 		Cmd:     protocol.CmdUploadDone,
 		Counter: c.nextCounter(),
-		Payload: encHash,
 	}
 	frame, err = c.sendPacket(pkt, c.clientID)
 	if err != nil {
