@@ -5,7 +5,7 @@
 // The binary packet is: [cmd 1B] [counter 3B big-endian] [payload...]
 // This is encrypted, then base36-encoded, then split across DNS labels.
 //
-// Blocks 1-3 have lengths 60-63, encoding 2 bits each (6 bits total = client ID).
+// Blocks 1-3 have lengths 60-63, encoding 2 bits each (6 bits total = channel ID).
 // Block 4 gets the remaining space to fill up to 253 total chars.
 //
 // Response: base36-encoded in TXT record.
@@ -23,7 +23,7 @@ import (
 
 // Command codes
 const (
-	CmdConnect    byte = 'c' // Initial connection, server assigns client ID
+	CmdConnect    byte = 'c' // Initial connection, server assigns channel ID
 	CmdPoll       byte = 'p' // Poll for queued data (no upstream payload)
 	CmdData       byte = 'd' // Upstream data transfer
 	CmdFile       byte = 'f' // Request a file by name
@@ -48,7 +48,7 @@ const (
 const (
 	maxDomainLen = 253
 	numBlocks    = 4
-	// Blocks 1-3 carry client ID in their lengths (60-63)
+	// Blocks 1-3 carry channel ID in their lengths (60-63)
 	minBlockLen = 60
 	maxBlockLen = 63
 	numIDBlocks = 3 // first 3 blocks carry 2 bits each
@@ -94,8 +94,8 @@ type QueryConfig struct {
 // MaxPayload returns the maximum plaintext payload bytes that can fit in a query
 // for a given domain, after accounting for cmd, counter, encryption, and encoding.
 // cipherOverhead is the number of bytes added by encryption (nonce + tag).
-func (qc *QueryConfig) MaxPayload(clientID byte, cipherOverhead int) int {
-	totalEncoded := qc.totalEncodedChars(clientID)
+func (qc *QueryConfig) MaxPayload(channelID byte, cipherOverhead int) int {
+	totalEncoded := qc.totalEncodedChars(channelID)
 	rawBytes := encoding.MaxDecodedSize(totalEncoded)
 	// Raw layout after encryption: encrypted(cmd 1B + counter 3B + payload)
 	// encrypted adds cipherOverhead bytes
@@ -107,8 +107,8 @@ func (qc *QueryConfig) MaxPayload(clientID byte, cipherOverhead int) int {
 }
 
 // totalEncodedChars returns the total base36 chars available across all blocks.
-func (qc *QueryConfig) totalEncodedChars(clientID byte) int {
-	b1, b2, b3 := clientIDToBlockLens(clientID)
+func (qc *QueryConfig) totalEncodedChars(channelID byte) int {
+	b1, b2, b3 := channelIDToBlockLens(channelID)
 	// dots: 3 between blocks + 1 before domain = 4
 	b4 := maxDomainLen - len(qc.Domain) - b1 - b2 - b3 - numBlocks
 	if b4 < 0 {
@@ -118,11 +118,11 @@ func (qc *QueryConfig) totalEncodedChars(clientID byte) int {
 }
 
 // EncodeQuery encodes raw bytes (typically encrypted) into a DNS query name.
-// The clientID is encoded in the DNS label lengths.
-func (qc *QueryConfig) EncodeQuery(data []byte, clientID byte) (string, error) {
+// The channelID is encoded in the DNS label lengths.
+func (qc *QueryConfig) EncodeQuery(data []byte, channelID byte) (string, error) {
 	encoded := encoding.Encode(data)
 
-	b1, b2, b3 := clientIDToBlockLens(clientID)
+	b1, b2, b3 := channelIDToBlockLens(channelID)
 	b4 := maxDomainLen - len(qc.Domain) - b1 - b2 - b3 - numBlocks
 	if b4 < 0 {
 		return "", fmt.Errorf("domain too long: no space for data")
@@ -157,7 +157,7 @@ func (qc *QueryConfig) EncodeQuery(data []byte, clientID byte) (string, error) {
 	return strings.Join(parts, "."), nil
 }
 
-// DecodeQuery decodes a DNS query name back into raw bytes and client ID.
+// DecodeQuery decodes a DNS query name back into raw bytes and channel ID.
 // The returned bytes are typically encrypted and need decryption before unmarshaling.
 func (qc *QueryConfig) DecodeQuery(query string) ([]byte, byte, error) {
 	query = strings.ToLower(query)
@@ -176,7 +176,7 @@ func (qc *QueryConfig) DecodeQuery(query string) ([]byte, byte, error) {
 	b1Len := len(labels[3])
 	b2Len := len(labels[2])
 	b3Len := len(labels[1])
-	clientID := blockLensToClientID(b1Len, b2Len, b3Len)
+	channelID := blockLensToChannelID(b1Len, b2Len, b3Len)
 
 	var encoded strings.Builder
 	for _, l := range labels {
@@ -188,7 +188,7 @@ func (qc *QueryConfig) DecodeQuery(query string) ([]byte, byte, error) {
 		return nil, 0, fmt.Errorf("base36 decode: %w", err)
 	}
 
-	return data, clientID, nil
+	return data, channelID, nil
 }
 
 // Response represents a server response (application layer).
@@ -269,17 +269,17 @@ func UnmarshalFrame(data []byte) (*Frame, error) {
 	}, nil
 }
 
-// clientIDToBlockLens returns the lengths of blocks 1-3 for a given client ID (0-63).
-func clientIDToBlockLens(clientID byte) (b1, b2, b3 int) {
-	id := clientID & 0x3F // mask to 6 bits
+// channelIDToBlockLens returns the lengths of blocks 1-3 for a given channel ID (0-63).
+func channelIDToBlockLens(channelID byte) (b1, b2, b3 int) {
+	id := channelID & 0x3F // mask to 6 bits
 	b1 = minBlockLen + int(id&0x03)
 	b2 = minBlockLen + int((id>>2)&0x03)
 	b3 = minBlockLen + int((id>>4)&0x03)
 	return
 }
 
-// blockLensToClientID reconstructs the client ID from block lengths.
-func blockLensToClientID(b1, b2, b3 int) byte {
+// blockLensToChannelID reconstructs the channel ID from block lengths.
+func blockLensToChannelID(b1, b2, b3 int) byte {
 	bits1 := byte(b1-minBlockLen) & 0x03
 	bits2 := byte(b2-minBlockLen) & 0x03
 	bits3 := byte(b3-minBlockLen) & 0x03

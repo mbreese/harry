@@ -36,7 +36,7 @@ type Client struct {
 	config   *Config
 	cipher   *crypto.Cipher
 	qc       *protocol.QueryConfig
-	clientID byte
+	channelID byte
 	counter  uint32
 	tuneSize int // negotiated response size
 
@@ -82,11 +82,11 @@ func (c *Client) Connect() error {
 	}
 
 	if len(frame.Payload) < 1 {
-		return fmt.Errorf("no client ID in connect response")
+		return fmt.Errorf("no channel ID in connect response")
 	}
 
-	c.clientID = frame.Payload[0]
-	log.Printf("connected with client ID: %d", c.clientID)
+	c.channelID = frame.Payload[0]
+	log.Printf("connected with channel ID: %d", c.channelID)
 
 	if err := c.autoTune(); err != nil {
 		log.Printf("auto-tune failed, using default size %d: %v", c.tuneSize, err)
@@ -101,7 +101,7 @@ func (c *Client) Poll() (*protocol.Frame, error) {
 		Cmd:     protocol.CmdPoll,
 		Counter: c.nextCounter(),
 	}
-	return c.sendPacket(pkt, c.clientID)
+	return c.sendPacket(pkt, c.channelID)
 }
 
 // pollAck sends a poll with ACK for a transfer chunk, requesting the next chunk.
@@ -114,7 +114,7 @@ func (c *Client) pollAck(transferID, lastAck uint16) (*protocol.Frame, error) {
 			byte(lastAck >> 8), byte(lastAck),
 		},
 	}
-	return c.sendPacket(pkt, c.clientID)
+	return c.sendPacket(pkt, c.channelID)
 }
 
 // recvTransfer receives all chunks of a transfer started by an initial frame.
@@ -174,7 +174,7 @@ func (c *Client) StartRShell(pollInterval time.Duration) error {
 		Counter: c.nextCounter(),
 	}
 
-	frame, err := c.sendPacket(pkt, c.clientID)
+	frame, err := c.sendPacket(pkt, c.channelID)
 	if err != nil {
 		return fmt.Errorf("rshell start: %w", err)
 	}
@@ -326,7 +326,7 @@ func (c *Client) StartRShell(pollInterval time.Duration) error {
 // The entire packet (cmd+counter+payload) is encrypted, so we subtract the
 // packet header (4 bytes) from MaxPayload.
 func (c *Client) MaxUpstreamChunk() int {
-	return c.qc.MaxPayload(c.clientID, c.cipher.Overhead())
+	return c.qc.MaxPayload(c.channelID, c.cipher.Overhead())
 }
 
 // SendData sends upstream data in a single DNS query.
@@ -337,7 +337,7 @@ func (c *Client) SendData(data []byte) (*protocol.Frame, error) {
 		Counter: c.nextCounter(),
 		Payload: data,
 	}
-	return c.sendPacket(pkt, c.clientID)
+	return c.sendPacket(pkt, c.channelID)
 }
 
 // SendDataChunked sends data in multiple DNS queries if needed,
@@ -396,7 +396,7 @@ func (c *Client) FetchURL(url string, flags byte) ([]byte, error) {
 		Payload: append([]byte{flags}, []byte(url)...),
 	}
 
-	frame, err := c.sendPacket(pkt, c.clientID)
+	frame, err := c.sendPacket(pkt, c.channelID)
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +411,7 @@ func (c *Client) ListFiles() ([]string, error) {
 		Counter: c.nextCounter(),
 	}
 
-	frame, err := c.sendPacket(pkt, c.clientID)
+	frame, err := c.sendPacket(pkt, c.channelID)
 	if err != nil {
 		return nil, err
 	}
@@ -436,7 +436,7 @@ func (c *Client) RequestFile(name string) ([]byte, error) {
 		Payload: []byte(name),
 	}
 
-	frame, err := c.sendPacket(pkt, c.clientID)
+	frame, err := c.sendPacket(pkt, c.channelID)
 	if err != nil {
 		return nil, err
 	}
@@ -495,7 +495,7 @@ func (c *Client) sendData(data []byte, remoteName string, flags byte, showPct bo
 		Payload: append([]byte{flags}, []byte(remoteName)...),
 	}
 
-	frame, err := c.sendPacket(pkt, c.clientID)
+	frame, err := c.sendPacket(pkt, c.channelID)
 	if err != nil {
 		return fmt.Errorf("send start: %w", err)
 	}
@@ -528,7 +528,7 @@ func (c *Client) sendData(data []byte, remoteName string, flags byte, showPct bo
 			Payload: chunk,
 		}
 
-		frame, err := c.sendPacket(pkt, c.clientID)
+		frame, err := c.sendPacket(pkt, c.channelID)
 		if err != nil {
 			return fmt.Errorf("send chunk: %w", err)
 		}
@@ -562,7 +562,7 @@ func (c *Client) sendData(data []byte, remoteName string, flags byte, showPct bo
 		Counter: c.nextCounter(),
 		Payload: donePayload,
 	}
-	frame, err = c.sendPacket(pkt, c.clientID)
+	frame, err = c.sendPacket(pkt, c.channelID)
 	if err != nil {
 		return fmt.Errorf("send done: %w", err)
 	}
@@ -588,7 +588,7 @@ func (c *Client) autoTune() error {
 			Payload: []byte{byte(size >> 8), byte(size)},
 		}
 
-		frame, err := c.sendPacket(pkt, c.clientID)
+		frame, err := c.sendPacket(pkt, c.channelID)
 		if err != nil {
 			log.Printf("auto-tune: size %d failed: %v", size, err)
 			break
@@ -606,7 +606,7 @@ func (c *Client) autoTune() error {
 }
 
 // sendPacket encrypts a packet, encodes as DNS query, sends it, and returns the decoded frame.
-func (c *Client) sendPacket(pkt *protocol.Packet, clientID byte) (*protocol.Frame, error) {
+func (c *Client) sendPacket(pkt *protocol.Packet, channelID byte) (*protocol.Frame, error) {
 	// Marshal → compress → encrypt → base36 → DNS labels
 	marshaled := pkt.Marshal()
 	compressed := gzipCompress(marshaled)
@@ -615,7 +615,7 @@ func (c *Client) sendPacket(pkt *protocol.Packet, clientID byte) (*protocol.Fram
 		return nil, fmt.Errorf("encrypt packet: %w", err)
 	}
 
-	query, err := c.qc.EncodeQuery(encrypted, clientID)
+	query, err := c.qc.EncodeQuery(encrypted, channelID)
 	if err != nil {
 		return nil, fmt.Errorf("encode query: %w", err)
 	}

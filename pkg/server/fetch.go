@@ -26,8 +26,8 @@ var noRedirectHTTPClient = &http.Client{
 }
 
 // handleFetch fetches a URL and creates a transfer for the response.
-func (h *Handler) handleFetch(pkt *protocol.Packet, clientID byte) *protocol.Frame {
-	session := h.sessions.Get(clientID)
+func (h *Handler) handleFetch(pkt *protocol.Packet, channelID byte) *protocol.Frame {
+	session := h.sessions.Get(channelID)
 	if session == nil {
 		return errorFrame()
 	}
@@ -40,7 +40,7 @@ func (h *Handler) handleFetch(pkt *protocol.Packet, clientID byte) *protocol.Fra
 	fetchFlags := pkt.Payload[0]
 	url := string(pkt.Payload[1:])
 
-	log.Printf("client %d: fetching %s (flags=%02x)", clientID, url, fetchFlags)
+	log.Printf("ch %d: fetching %s (flags=%02x)", channelID, url, fetchFlags)
 
 	client := defaultHTTPClient
 	if fetchFlags&fetchNoRedirect != 0 {
@@ -49,7 +49,7 @@ func (h *Handler) handleFetch(pkt *protocol.Packet, clientID byte) *protocol.Fra
 
 	resp, err := client.Get(url)
 	if err != nil {
-		log.Printf("client %d: fetch error: %v", clientID, err)
+		log.Printf("ch %d: fetch error: %v", channelID, err)
 		errMsg := fmt.Sprintf("fetch error: %v", err)
 		return &protocol.Frame{Flags: protocol.FlagError, Payload: []byte(errMsg)}
 	}
@@ -57,7 +57,7 @@ func (h *Handler) handleFetch(pkt *protocol.Packet, clientID byte) *protocol.Fra
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("client %d: fetch read error: %v", clientID, err)
+		log.Printf("ch %d: fetch read error: %v", channelID, err)
 		errMsg := fmt.Sprintf("read error: %v", err)
 		return &protocol.Frame{Flags: protocol.FlagError, Payload: []byte(errMsg)}
 	}
@@ -65,7 +65,7 @@ func (h *Handler) handleFetch(pkt *protocol.Packet, clientID byte) *protocol.Fra
 	header := fmt.Sprintf("HTTP %d %s\n", resp.StatusCode, resp.Status)
 	fullResp := append([]byte(header), body...)
 
-	log.Printf("client %d: fetched %s (%d bytes, status %d)", clientID, url, len(body), resp.StatusCode)
+	log.Printf("ch %d: fetched %s (%d bytes, status %d)", channelID, url, len(body), resp.StatusCode)
 
 	maxPayload := h.responsePayloadSize(session)
 	t := session.Transfers.NewTransfer(fullResp, maxPayload)

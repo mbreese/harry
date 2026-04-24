@@ -21,15 +21,15 @@ type rshellBridge struct {
 }
 
 // handleRShell starts a reverse shell bridge for the client.
-func (h *Handler) handleRShell(pkt *protocol.Packet, clientID byte) *protocol.Frame {
-	session := h.sessions.Get(clientID)
+func (h *Handler) handleRShell(pkt *protocol.Packet, channelID byte) *protocol.Frame {
+	session := h.sessions.Get(channelID)
 	if session == nil {
 		return errorFrame()
 	}
 	session.LastSeen = now()
 
 	if h.config.RShellAddr == "" {
-		log.Printf("client %d: rshell rejected, no rshell address configured", clientID)
+		log.Printf("ch %d: rshell rejected, no rshell address configured", channelID)
 		return &protocol.Frame{
 			Flags:   protocol.FlagError,
 			Payload: []byte("rshell not enabled on server"),
@@ -47,7 +47,7 @@ func (h *Handler) handleRShell(pkt *protocol.Packet, clientID byte) *protocol.Fr
 	// Start the TCP listener
 	listener, err := net.Listen("tcp", h.config.RShellAddr)
 	if err != nil {
-		log.Printf("client %d: rshell listen error: %v", clientID, err)
+		log.Printf("ch %d: rshell listen error: %v", channelID, err)
 		return &protocol.Frame{
 			Flags:   protocol.FlagError,
 			Payload: []byte(fmt.Sprintf("listen error: %v", err)),
@@ -64,10 +64,10 @@ func (h *Handler) handleRShell(pkt *protocol.Packet, clientID byte) *protocol.Fr
 	session.RShell = bridge
 	session.mu.Unlock()
 
-	log.Printf("client %d: rshell listening on %s", clientID, h.config.RShellAddr)
+	log.Printf("ch %d: rshell listening on %s", channelID, h.config.RShellAddr)
 
 	// Accept connections in background
-	go bridge.acceptLoop(clientID)
+	go bridge.acceptLoop(channelID)
 
 	return &protocol.Frame{
 		Payload: []byte(fmt.Sprintf("listening on %s", listener.Addr().String())),
@@ -75,7 +75,7 @@ func (h *Handler) handleRShell(pkt *protocol.Packet, clientID byte) *protocol.Fr
 }
 
 // acceptLoop accepts TCP connections and reads data from them.
-func (b *rshellBridge) acceptLoop(clientID byte) {
+func (b *rshellBridge) acceptLoop(channelID byte) {
 	defer b.listener.Close()
 
 	for {
@@ -92,15 +92,15 @@ func (b *rshellBridge) acceptLoop(clientID byte) {
 		b.conn = conn
 		b.mu.Unlock()
 
-		log.Printf("client %d: rshell TCP connection from %s", clientID, conn.RemoteAddr())
+		log.Printf("ch %d: rshell TCP connection from %s", channelID, conn.RemoteAddr())
 
 		// Read from TCP in background, buffer for client polling
-		go b.readTCP(clientID)
+		go b.readTCP(channelID)
 	}
 }
 
 // readTCP reads data from the TCP connection and buffers it.
-func (b *rshellBridge) readTCP(clientID byte) {
+func (b *rshellBridge) readTCP(channelID byte) {
 	buf := make([]byte, 4096)
 	for {
 		b.mu.Lock()
@@ -115,12 +115,12 @@ func (b *rshellBridge) readTCP(clientID byte) {
 			b.mu.Lock()
 			b.buf = append(b.buf, buf[:n]...)
 			b.tcpRecv += int64(n)
-			log.Printf("client %d: rshell tcp_recv=%d tcp_sent=%d", clientID, b.tcpRecv, b.tcpSent)
+			log.Printf("ch %d: rshell tcp_recv=%d tcp_sent=%d", channelID, b.tcpRecv, b.tcpSent)
 			b.mu.Unlock()
 		}
 		if err != nil {
 			b.mu.Lock()
-			log.Printf("client %d: rshell TCP closed (tcp_recv=%d tcp_sent=%d)", clientID, b.tcpRecv, b.tcpSent)
+			log.Printf("ch %d: rshell TCP closed (tcp_recv=%d tcp_sent=%d)", channelID, b.tcpRecv, b.tcpSent)
 			b.mu.Unlock()
 			return
 		}

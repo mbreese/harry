@@ -172,7 +172,7 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	// Decode the tunnel query (returns encrypted bytes)
-	encData, clientID, err := h.qc.DecodeQuery(qname)
+	encData, channelID, err := h.qc.DecodeQuery(qname)
 	if err != nil {
 		if h.config.Verbose {
 			log.Printf("[%s] stray query: %s", src, qname)
@@ -186,7 +186,7 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	decrypted, err := h.cipher.Decrypt(encData)
 	if err != nil {
 		if h.config.Verbose {
-			log.Printf("[%s] decrypt error from client %d: %v", src, clientID, err)
+			log.Printf("[%s] decrypt error from ch %d: %v", src, channelID, err)
 		}
 		msg.Rcode = dns.RcodeRefused
 		w.WriteMsg(msg)
@@ -208,18 +208,18 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	if h.config.Verbose {
-		log.Printf("[%s] recv client=%d cmd=%c counter=%d payload=%d",
-			src, clientID, pkt.Cmd, pkt.Counter, len(pkt.Payload))
+		log.Printf("[%s] recv ch=%d cmd=%c counter=%d payload=%d",
+			src, channelID, pkt.Cmd, pkt.Counter, len(pkt.Payload))
 	}
 
 	// Check response cache — DNS resolvers may send the same query to
 	// multiple upstreams, causing duplicate processing. Return cached
 	// response for duplicate requests.
-	session := h.sessions.Get(clientID)
+	session := h.sessions.Get(channelID)
 	if session != nil {
 		if cached := session.GetCachedResponse(pkt.Counter); cached != nil {
 			if h.config.Verbose {
-				log.Printf("[%s] dedup client=%d counter=%d (cached response)", src, clientID, pkt.Counter)
+				log.Printf("[%s] dedup ch=%d counter=%d (cached response)", src, channelID, pkt.Counter)
 			}
 			txt := encoding.Encode(cached)
 			rr := &dns.TXT{
@@ -238,7 +238,7 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	// Process command — returns a frame ready for encoding
-	frame := h.processCommand(pkt, clientID, src)
+	frame := h.processCommand(pkt, channelID, src)
 
 	// Compress and encrypt frame payload
 	if len(frame.Payload) > 0 {
@@ -268,8 +268,8 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		if len(wireFrame) >= 4 {
 			crc = uint32(wireFrame[0])<<24 | uint32(wireFrame[1])<<16 | uint32(wireFrame[2])<<8 | uint32(wireFrame[3])
 		}
-		log.Printf("[%s] send client=%d transfer=%d chunk=%d/%d flags=%02x crc=%08x payload=%d encoded=%d",
-			src, clientID, frame.TransferID, frame.ChunkIdx, frame.ChunkTotal,
+		log.Printf("[%s] send ch=%d transfer=%d chunk=%d/%d flags=%02x crc=%08x payload=%d encoded=%d",
+			src, channelID, frame.TransferID, frame.ChunkIdx, frame.ChunkTotal,
 			frame.Flags, crc, len(frame.Payload), len(txt))
 	}
 
@@ -292,34 +292,34 @@ func errorFrame() *protocol.Frame {
 }
 
 // processCommand handles a decoded packet and returns a frame for the response.
-func (h *Handler) processCommand(pkt *protocol.Packet, clientID byte, src string) *protocol.Frame {
+func (h *Handler) processCommand(pkt *protocol.Packet, channelID byte, src string) *protocol.Frame {
 	switch pkt.Cmd {
 	case protocol.CmdConnect:
 		return h.handleConnect(src)
 	case protocol.CmdPoll:
-		return h.handlePoll(pkt, clientID)
+		return h.handlePoll(pkt, channelID)
 	case protocol.CmdData:
-		return h.handleData(pkt, clientID)
+		return h.handleData(pkt, channelID)
 	case protocol.CmdFile:
-		return h.handleFile(pkt, clientID)
+		return h.handleFile(pkt, channelID)
 	case protocol.CmdTune:
-		return h.handleTune(pkt, clientID)
+		return h.handleTune(pkt, channelID)
 	case protocol.CmdUpload:
-		return h.handleUploadStart(pkt, clientID)
+		return h.handleUploadStart(pkt, channelID)
 	case protocol.CmdUploadDone:
-		return h.handleUploadDone(pkt, clientID)
+		return h.handleUploadDone(pkt, channelID)
 	case protocol.CmdList:
-		return h.handleList(clientID)
+		return h.handleList(channelID)
 	case protocol.CmdFetch:
-		return h.handleFetch(pkt, clientID)
+		return h.handleFetch(pkt, channelID)
 	case protocol.CmdRShell:
-		return h.handleRShell(pkt, clientID)
+		return h.handleRShell(pkt, channelID)
 	case protocol.CmdSocks5:
-		return h.handleSocks5Start(pkt, clientID)
+		return h.handleSocks5Start(pkt, channelID)
 	case protocol.CmdStreamOpen:
-		return h.handleStreamOpen(pkt, clientID)
+		return h.handleStreamOpen(pkt, channelID)
 	case protocol.CmdStreamClose:
-		return h.handleStreamClose(pkt, clientID)
+		return h.handleStreamClose(pkt, channelID)
 	default:
 		log.Printf("unknown command: %c", pkt.Cmd)
 		return errorFrame()
@@ -332,7 +332,7 @@ func (h *Handler) handleConnect(src string) *protocol.Frame {
 		log.Printf("[%s] connect error: %v", src, err)
 		return errorFrame()
 	}
-	log.Printf("[%s] new client connected: ID=%d", src, session.ID)
+	log.Printf("[%s] new channel connected: ID=%d", src, session.ID)
 	return &protocol.Frame{
 		Payload: []byte{session.ID},
 	}
@@ -340,8 +340,8 @@ func (h *Handler) handleConnect(src string) *protocol.Frame {
 
 // handlePoll returns the next chunk of an active transfer,
 // or data from a reverse shell bridge.
-func (h *Handler) handlePoll(pkt *protocol.Packet, clientID byte) *protocol.Frame {
-	session := h.sessions.Get(clientID)
+func (h *Handler) handlePoll(pkt *protocol.Packet, channelID byte) *protocol.Frame {
+	session := h.sessions.Get(channelID)
 	if session == nil {
 		return errorFrame()
 	}
@@ -394,8 +394,8 @@ func (h *Handler) handlePoll(pkt *protocol.Packet, clientID byte) *protocol.Fram
 	return h.chunkFrame(t, nextIdx)
 }
 
-func (h *Handler) handleData(pkt *protocol.Packet, clientID byte) *protocol.Frame {
-	session := h.sessions.Get(clientID)
+func (h *Handler) handleData(pkt *protocol.Packet, channelID byte) *protocol.Frame {
+	session := h.sessions.Get(channelID)
 	if session == nil {
 		return errorFrame()
 	}
@@ -417,22 +417,22 @@ func (h *Handler) handleData(pkt *protocol.Packet, clientID byte) *protocol.Fram
 		}
 		if err := session.Socks5.writeToStream(streamID, data[:length]); err != nil {
 			if h.config.Verbose {
-				log.Printf("client %d: socks5 stream %d write error: %v", clientID, streamID, err)
+				log.Printf("ch %d: socks5 stream %d write error: %v", channelID, streamID, err)
 			}
 		}
 	} else if session.RShell != nil && len(pkt.Payload) > 0 {
 		// Reverse shell: forward to TCP connection
 		if err := session.RShell.WriteToTCP(pkt.Payload); err != nil {
-			log.Printf("client %d: rshell write error: %v", clientID, err)
+			log.Printf("ch %d: rshell write error: %v", channelID, err)
 		}
 	} else if session.UploadFile != "" && len(pkt.Payload) > 0 {
 		// Upload: write to file
 		if err := h.appendUpload(session, pkt.Payload); err != nil {
-			log.Printf("client %d: upload write error: %v", clientID, err)
+			log.Printf("ch %d: upload write error: %v", channelID, err)
 			return errorFrame()
 		}
 	} else if len(pkt.Payload) > 0 {
-		log.Printf("client %d: received %d bytes upstream (no handler)", clientID, len(pkt.Payload))
+		log.Printf("ch %d: received %d bytes upstream (no handler)", channelID, len(pkt.Payload))
 	}
 
 	// Piggyback any buffered downstream data on the response.
@@ -475,8 +475,8 @@ func (h *Handler) chunkFrame(t *Transfer, idx uint16) *protocol.Frame {
 	}
 }
 
-func (h *Handler) handleFile(pkt *protocol.Packet, clientID byte) *protocol.Frame {
-	session := h.sessions.Get(clientID)
+func (h *Handler) handleFile(pkt *protocol.Packet, channelID byte) *protocol.Frame {
+	session := h.sessions.Get(channelID)
 	if session == nil {
 		return errorFrame()
 	}
@@ -485,7 +485,7 @@ func (h *Handler) handleFile(pkt *protocol.Packet, clientID byte) *protocol.Fram
 	filename := string(pkt.Payload)
 	data, err := h.files.Get(filename)
 	if err != nil {
-		log.Printf("client %d: file request error: %v", clientID, err)
+		log.Printf("ch %d: file request error: %v", channelID, err)
 		return errorFrame()
 	}
 
@@ -496,15 +496,15 @@ func (h *Handler) handleFile(pkt *protocol.Packet, clientID byte) *protocol.Fram
 	// Create a transfer with indexed chunks
 	maxPayload := h.responsePayloadSize(session)
 	t := session.Transfers.NewTransfer(payload, maxPayload)
-	log.Printf("client %d: file %q → transfer %d (%d bytes, %d chunks, sha1=%x)",
-		clientID, filename, t.ID, len(data), t.TotalChunks, hash)
+	log.Printf("ch %d: file %q → transfer %d (%d bytes, %d chunks, sha1=%x)",
+		channelID, filename, t.ID, len(data), t.TotalChunks, hash)
 
 	// Return first chunk
 	return h.chunkFrame(t, 0)
 }
 
-func (h *Handler) handleList(clientID byte) *protocol.Frame {
-	session := h.sessions.Get(clientID)
+func (h *Handler) handleList(channelID byte) *protocol.Frame {
+	session := h.sessions.Get(channelID)
 	if session == nil {
 		return errorFrame()
 	}
@@ -512,7 +512,7 @@ func (h *Handler) handleList(clientID byte) *protocol.Frame {
 
 	names, err := h.files.List()
 	if err != nil {
-		log.Printf("client %d: list error: %v", clientID, err)
+		log.Printf("ch %d: list error: %v", channelID, err)
 		return errorFrame()
 	}
 
@@ -522,8 +522,8 @@ func (h *Handler) handleList(clientID byte) *protocol.Frame {
 	return h.chunkFrame(t, 0)
 }
 
-func (h *Handler) handleTune(pkt *protocol.Packet, clientID byte) *protocol.Frame {
-	session := h.sessions.Get(clientID)
+func (h *Handler) handleTune(pkt *protocol.Packet, channelID byte) *protocol.Frame {
+	session := h.sessions.Get(channelID)
 	if session == nil {
 		return errorFrame()
 	}

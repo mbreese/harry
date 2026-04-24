@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// Session represents a connected client.
+// Session represents a connected channel.
 type Session struct {
 	ID        byte
 	CreatedAt time.Time
@@ -87,7 +87,7 @@ func (s *Session) GetCachedResponse(counter uint32) []byte {
 	return s.responseCache[counter]
 }
 
-// SessionManager manages client sessions.
+// SessionManager manages channel sessions.
 type SessionManager struct {
 	mu       sync.RWMutex
 	sessions map[byte]*Session
@@ -102,7 +102,7 @@ func NewSessionManager() *SessionManager {
 	}
 }
 
-// NewSession creates and registers a new client session.
+// NewSession creates and registers a new channel session.
 func (sm *SessionManager) NewSession() (*Session, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -117,7 +117,7 @@ func (sm *SessionManager) NewSession() (*Session, error) {
 			sm.nextID = 1
 		}
 		if sm.nextID == startID {
-			return nil, ErrMaxClients
+			return nil, ErrMaxChannels
 		}
 	}
 
@@ -150,8 +150,8 @@ func (sm *SessionManager) Remove(id byte) {
 	delete(sm.sessions, id)
 }
 
-var ErrMaxClients = &maxClientsError{}
+var ErrMaxChannels = &maxChannelsError{}
 
-type maxClientsError struct{}
+type maxChannelsError struct{}
 
-func (e *maxClientsError) Error() string { return "maximum number of clients reached" }
+func (e *maxChannelsError) Error() string { return "maximum number of channels reached" }

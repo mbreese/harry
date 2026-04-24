@@ -25,7 +25,7 @@ func (c *Client) StartSocks5(listenAddr string, pollInterval time.Duration) erro
 		Cmd:     protocol.CmdSocks5,
 		Counter: c.nextCounter(),
 	}
-	frame, err := c.sendPacket(pkt, c.clientID)
+	frame, err := c.sendPacket(pkt, c.channelID)
 	if err != nil {
 		return fmt.Errorf("socks5 start: %w", err)
 	}
@@ -93,7 +93,7 @@ func (c *Client) StartSocks5(listenAddr string, pollInterval time.Duration) erro
 								Counter: c.nextCounter(),
 								Payload: encPayload,
 							}
-							c.sendPacket(closePkt, c.clientID)
+							c.sendPacket(closePkt, c.channelID)
 
 							mu.Lock()
 							delete(streams, id)
@@ -275,7 +275,7 @@ func (c *Client) handleSocks5Conn(conn net.Conn, streamID uint16) (*socks5Stream
 		Payload: encPayload,
 	}
 
-	frame, err := c.sendPacket(pkt, c.clientID)
+	frame, err := c.sendPacket(pkt, c.channelID)
 	if err != nil {
 		conn.Write([]byte{0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return nil, fmt.Errorf("stream open: %w", err)

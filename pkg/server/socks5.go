@@ -31,7 +31,7 @@ func newSocks5Bridge() *socks5Bridge {
 }
 
 // openStream dials the target and creates a new stream.
-func (b *socks5Bridge) openStream(id uint16, addr string, clientID byte) error {
+func (b *socks5Bridge) openStream(id uint16, addr string, channelID byte) error {
 	conn, err := net.DialTimeout("tcp", addr, 15*time.Second)
 	if err != nil {
 		return err
@@ -46,10 +46,10 @@ func (b *socks5Bridge) openStream(id uint16, addr string, clientID byte) error {
 	b.streams[id] = stream
 	b.mu.Unlock()
 
-	log.Printf("client %d: socks5 stream %d opened → %s", clientID, id, addr)
+	log.Printf("ch %d: socks5 stream %d opened → %s", channelID, id, addr)
 
 	// Read from remote in background
-	go b.readStream(stream, clientID)
+	go b.readStream(stream, channelID)
 
 	return nil
 }
@@ -69,7 +69,7 @@ func (b *socks5Bridge) closeStream(id uint16) {
 }
 
 // readStream reads data from a remote TCP connection into the stream buffer.
-func (b *socks5Bridge) readStream(stream *proxyStream, clientID byte) {
+func (b *socks5Bridge) readStream(stream *proxyStream, channelID byte) {
 	buf := make([]byte, 4096)
 	for {
 		n, err := stream.conn.Read(buf)
@@ -79,7 +79,7 @@ func (b *socks5Bridge) readStream(stream *proxyStream, clientID byte) {
 			stream.mu.Unlock()
 		}
 		if err != nil {
-			log.Printf("client %d: socks5 stream %d remote closed", clientID, stream.id)
+			log.Printf("ch %d: socks5 stream %d remote closed", channelID, stream.id)
 			return
 		}
 	}
@@ -161,8 +161,8 @@ func (b *socks5Bridge) Close() {
 }
 
 // handleSocks5Start enables SOCKS5 proxy mode for the session.
-func (h *Handler) handleSocks5Start(pkt *protocol.Packet, clientID byte) *protocol.Frame {
-	session := h.sessions.Get(clientID)
+func (h *Handler) handleSocks5Start(pkt *protocol.Packet, channelID byte) *protocol.Frame {
+	session := h.sessions.Get(channelID)
 	if session == nil {
 		return errorFrame()
 	}
@@ -172,14 +172,14 @@ func (h *Handler) handleSocks5Start(pkt *protocol.Packet, clientID byte) *protoc
 	session.Socks5 = newSocks5Bridge()
 	session.mu.Unlock()
 
-	log.Printf("client %d: socks5 proxy enabled", clientID)
+	log.Printf("ch %d: socks5 proxy enabled", channelID)
 	return &protocol.Frame{Payload: []byte("ok")}
 }
 
 // handleStreamOpen opens a new proxied TCP connection.
 // Payload: [stream_id 2B][addr_type 1B][addr...][port 2B]
-func (h *Handler) handleStreamOpen(pkt *protocol.Packet, clientID byte) *protocol.Frame {
-	session := h.sessions.Get(clientID)
+func (h *Handler) handleStreamOpen(pkt *protocol.Packet, channelID byte) *protocol.Frame {
+	session := h.sessions.Get(channelID)
 	if session == nil {
 		return errorFrame()
 	}
@@ -230,8 +230,8 @@ func (h *Handler) handleStreamOpen(pkt *protocol.Packet, clientID byte) *protoco
 	port := uint16(pkt.Payload[portOffset])<<8 | uint16(pkt.Payload[portOffset+1])
 	addr := fmt.Sprintf("%s:%d", host, port)
 
-	if err := session.Socks5.openStream(streamID, addr, clientID); err != nil {
-		log.Printf("client %d: socks5 stream %d connect failed: %v", clientID, streamID, err)
+	if err := session.Socks5.openStream(streamID, addr, channelID); err != nil {
+		log.Printf("ch %d: socks5 stream %d connect failed: %v", channelID, streamID, err)
 		return &protocol.Frame{Flags: protocol.FlagError, Payload: []byte(err.Error())}
 	}
 
@@ -240,8 +240,8 @@ func (h *Handler) handleStreamOpen(pkt *protocol.Packet, clientID byte) *protoco
 
 // handleStreamClose closes a proxied TCP connection.
 // Payload: [stream_id 2B]
-func (h *Handler) handleStreamClose(pkt *protocol.Packet, clientID byte) *protocol.Frame {
-	session := h.sessions.Get(clientID)
+func (h *Handler) handleStreamClose(pkt *protocol.Packet, channelID byte) *protocol.Frame {
+	session := h.sessions.Get(channelID)
 	if session == nil {
 		return errorFrame()
 	}
@@ -253,7 +253,7 @@ func (h *Handler) handleStreamClose(pkt *protocol.Packet, clientID byte) *protoc
 
 	streamID := uint16(pkt.Payload[0])<<8 | uint16(pkt.Payload[1])
 	session.Socks5.closeStream(streamID)
-	log.Printf("client %d: socks5 stream %d closed", clientID, streamID)
+	log.Printf("ch %d: socks5 stream %d closed", channelID, streamID)
 
 	return &protocol.Frame{}
 }

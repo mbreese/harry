@@ -5,12 +5,12 @@ import (
 	"testing"
 )
 
-func TestClientIDEncoding(t *testing.T) {
+func TestChannelIDEncoding(t *testing.T) {
 	for id := byte(0); id < 64; id++ {
-		b1, b2, b3 := clientIDToBlockLens(id)
-		got := blockLensToClientID(b1, b2, b3)
+		b1, b2, b3 := channelIDToBlockLens(id)
+		got := blockLensToChannelID(b1, b2, b3)
 		if got != id {
-			t.Fatalf("client ID round trip failed: %d -> (%d,%d,%d) -> %d", id, b1, b2, b3, got)
+			t.Fatalf("channel ID round trip failed: %d -> (%d,%d,%d) -> %d", id, b1, b2, b3, got)
 		}
 		// Verify lengths are in range
 		for _, l := range []int{b1, b2, b3} {
@@ -45,29 +45,29 @@ func TestQueryRoundTrip(t *testing.T) {
 	for _, domain := range domains {
 		qc := &QueryConfig{Domain: domain}
 
-		for _, clientID := range []byte{0, 1, 7, 31, 63} {
+		for _, channelID := range []byte{0, 1, 7, 31, 63} {
 			// EncodeQuery now takes raw bytes (e.g., encrypted data)
 			data := []byte("test encrypted data")
 
-			query, err := qc.EncodeQuery(data, clientID)
+			query, err := qc.EncodeQuery(data, channelID)
 			if err != nil {
-				t.Fatalf("domain=%s clientID=%d: encode error: %v", domain, clientID, err)
+				t.Fatalf("domain=%s channelID=%d: encode error: %v", domain, channelID, err)
 			}
 
 			if len(query) > maxDomainLen {
-				t.Fatalf("domain=%s clientID=%d: query too long: %d", domain, clientID, len(query))
+				t.Fatalf("domain=%s channelID=%d: query too long: %d", domain, channelID, len(query))
 			}
 
 			gotData, gotID, err := qc.DecodeQuery(query)
 			if err != nil {
-				t.Fatalf("domain=%s clientID=%d: decode error: %v\n  query: %s", domain, clientID, err, query)
+				t.Fatalf("domain=%s channelID=%d: decode error: %v\n  query: %s", domain, channelID, err, query)
 			}
 
-			if gotID != clientID {
-				t.Fatalf("domain=%s: client ID mismatch: %d != %d", domain, gotID, clientID)
+			if gotID != channelID {
+				t.Fatalf("domain=%s: client ID mismatch: %d != %d", domain, gotID, channelID)
 			}
 			if !bytes.Equal(gotData, data) {
-				t.Fatalf("domain=%s clientID=%d: data mismatch", domain, clientID)
+				t.Fatalf("domain=%s channelID=%d: data mismatch", domain, channelID)
 			}
 		}
 	}
