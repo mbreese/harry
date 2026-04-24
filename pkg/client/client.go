@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -273,32 +274,33 @@ func (c *Client) RequestFile(name string) ([]byte, error) {
 	return fileData, nil
 }
 
-// UploadFlags controls upload behavior.
+// SendFlags controls send behavior.
 const (
-	UploadForce byte = 1 << 0 // Overwrite existing file
+	SendForce byte = 1 << 0 // Overwrite existing file on server
 )
 
-// UploadFile uploads a local file to the server.
-func (c *Client) UploadFile(localPath, remoteName string, flags byte) error {
+// SendFile sends a local file to the server.
+func (c *Client) SendFile(localPath, remoteName string, flags byte) error {
 	data, err := os.ReadFile(localPath)
 	if err != nil {
 		return fmt.Errorf("reading file: %w", err)
 	}
+	return c.sendData(data, remoteName, flags, true)
+}
 
-	// Compute SHA1 upfront
-	hash := sha1.Sum(data)
-	size := uint32(len(data))
+// SendStream reads from r and sends to the server as remoteName.
+// Size and SHA1 are computed on the fly and sent after all data.
+func (c *Client) SendStream(r io.Reader, remoteName string, flags byte) error {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return fmt.Errorf("reading stdin: %w", err)
+	}
+	return c.sendData(data, remoteName, flags, false)
+}
 
-	// Start upload: payload = [flags 1B][size 4B][sha1 20B][filename...]
-	uploadPayload := make([]byte, 1+4+20+len(remoteName))
-	uploadPayload[0] = flags
-	uploadPayload[1] = byte(size >> 24)
-	uploadPayload[2] = byte(size >> 16)
-	uploadPayload[3] = byte(size >> 8)
-	uploadPayload[4] = byte(size)
-	copy(uploadPayload[5:25], hash[:])
-	copy(uploadPayload[25:], remoteName)
-
+func (c *Client) sendData(data []byte, remoteName string, flags byte, showPct bool) error {
+	// Start upload: payload = [flags 1B][filename...]
+	uploadPayload := append([]byte{flags}, []byte(remoteName)...)
 	encPayload, err := c.cipher.Encrypt(uploadPayload)
 	if err != nil {
 		return fmt.Errorf("encrypt upload header: %w", err)
@@ -312,18 +314,22 @@ func (c *Client) UploadFile(localPath, remoteName string, flags byte) error {
 
 	frame, err := c.sendPacket(pkt, c.clientID)
 	if err != nil {
-		return fmt.Errorf("upload start: %w", err)
+		return fmt.Errorf("send start: %w", err)
 	}
 	if frame.Flags&protocol.FlagError != 0 {
-		return fmt.Errorf("server rejected upload")
+		if len(frame.Payload) > 0 {
+			return fmt.Errorf("server rejected: %s", frame.Payload)
+		}
+		return fmt.Errorf("server rejected send")
 	}
 
 	// Send data in chunks
 	maxPayload := c.qc.MaxPayload(c.clientID) - c.cipher.Overhead()
 	if maxPayload <= 0 {
-		return fmt.Errorf("no space for upload data")
+		return fmt.Errorf("no space for data")
 	}
 
+	hasher := sha1.New()
 	sent := 0
 	for sent < len(data) {
 		end := sent + maxPayload
@@ -331,6 +337,7 @@ func (c *Client) UploadFile(localPath, remoteName string, flags byte) error {
 			end = len(data)
 		}
 		chunk := data[sent:end]
+		hasher.Write(chunk)
 
 		encrypted, err := c.cipher.Encrypt(chunk)
 		if err != nil {
@@ -345,35 +352,55 @@ func (c *Client) UploadFile(localPath, remoteName string, flags byte) error {
 
 		frame, err := c.sendPacket(pkt, c.clientID)
 		if err != nil {
-			return fmt.Errorf("upload chunk: %w", err)
+			return fmt.Errorf("send chunk: %w", err)
 		}
 		if frame.Flags&protocol.FlagError != 0 {
-			return fmt.Errorf("server error during upload at byte %d", sent)
+			return fmt.Errorf("server error at byte %d", sent)
 		}
 
 		sent = end
-		pct := float64(sent) / float64(len(data))
-		showProgressBytes(sent, len(data), pct)
+		if showPct {
+			showProgressBytes(sent, len(data), float64(sent)/float64(len(data)))
+		} else {
+			fmt.Fprintf(os.Stderr, "\r%d bytes sent", sent)
+		}
 	}
 	fmt.Fprintf(os.Stderr, "\n")
 
-	// Signal upload complete — server verifies against hash/size from upload start
+	// Signal upload complete with size + SHA1 for verification
+	var hashBytes [20]byte
+	copy(hashBytes[:], hasher.Sum(nil))
+	size := uint32(len(data))
+
+	donePayload := make([]byte, 24)
+	donePayload[0] = byte(size >> 24)
+	donePayload[1] = byte(size >> 16)
+	donePayload[2] = byte(size >> 8)
+	donePayload[3] = byte(size)
+	copy(donePayload[4:], hashBytes[:])
+
+	encDone, err := c.cipher.Encrypt(donePayload)
+	if err != nil {
+		return fmt.Errorf("encrypt done: %w", err)
+	}
+
 	pkt = &protocol.Packet{
 		Cmd:     protocol.CmdUploadDone,
 		Counter: c.nextCounter(),
+		Payload: encDone,
 	}
 	frame, err = c.sendPacket(pkt, c.clientID)
 	if err != nil {
-		return fmt.Errorf("upload done: %w", err)
+		return fmt.Errorf("send done: %w", err)
 	}
 	if frame.Flags&protocol.FlagError != 0 {
 		if len(frame.Payload) > 0 {
-			return fmt.Errorf("upload verification failed: %s", frame.Payload)
+			return fmt.Errorf("verification failed: %s", frame.Payload)
 		}
-		return fmt.Errorf("server error on upload complete")
+		return fmt.Errorf("server error on complete")
 	}
 
-	log.Printf("upload complete: %d bytes", len(data))
+	log.Printf("send complete: %d bytes, sha1=%x", len(data), hashBytes)
 	return nil
 }
 

@@ -19,10 +19,8 @@ type Session struct {
 	Transfers *TransferManager
 
 	// Upload state
-	UploadFile     string // current upload filename (empty = no active upload)
-	UploadBytes    int    // bytes received so far
-	UploadExpSize  uint32 // expected file size
-	UploadExpHash  [20]byte // expected SHA1 hash
+	UploadFile  string // current upload filename (empty = no active upload)
+	UploadBytes int    // bytes received so far
 
 	// Deduplication: track seen request counters to detect DNS retries.
 	// DNS resolvers may retry any request, and retries can arrive

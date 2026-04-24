@@ -18,8 +18,8 @@ import (
 const usage = `Usage: harry [flags] <command> [args]
 
 Commands:
-  download <remote> [local]  Download a file (local defaults to remote name, - for stdout)
-  upload <local> [remote]    Upload a file (remote defaults to local name)
+  send <local> [remote]      Send a file to the server (local=- for stdin)
+  recv <remote> [local]      Receive a file from the server (local=- for stdout)
   list                       List available files on the server
   fetch <url>                Fetch a URL via the server (stdout)
   pipe                       Bidirectional stdin/stdout tunnel
@@ -46,7 +46,6 @@ func main() {
 	// Load RC file defaults
 	rc := loadRC(*rcFile)
 
-	// Flags override RC values
 	if *domain == "" {
 		*domain = rc["domain"]
 	}
@@ -55,9 +54,6 @@ func main() {
 	}
 	if *resolver == "" {
 		*resolver = rc["resolver"]
-	}
-	if *resolver == "" {
-		*resolver = "8.8.8.8:53"
 	}
 
 	args := flag.Args()
@@ -69,7 +65,6 @@ func main() {
 	cmd := args[0]
 	cmdArgs := args[1:]
 
-	// Validate required config
 	if *domain == "" || *password == "" {
 		fmt.Fprintln(os.Stderr, "error: domain and password are required (set via flags or ~/.harryrc)")
 		os.Exit(1)
@@ -92,19 +87,18 @@ func main() {
 	}
 
 	switch cmd {
-	case "download":
+	case "recv", "download":
 		if len(cmdArgs) < 1 {
-			log.Fatal("usage: harry download <remote> [local]")
+			log.Fatal("usage: harry recv <remote> [local]")
 		}
 		data, err := c.RequestFile(cmdArgs[0])
 		if err != nil {
-			log.Fatalf("download failed: %v", err)
+			log.Fatalf("recv failed: %v", err)
 		}
 		outPath := filepath.Base(cmdArgs[0])
 		if len(cmdArgs) >= 2 {
 			outPath = cmdArgs[1]
 		}
-		// Check if local file exists (unless -f or writing to stdout)
 		if outPath != "-" && !*force {
 			if _, err := os.Stat(outPath); err == nil {
 				log.Fatalf("file exists: %s (use -f to overwrite)", outPath)
@@ -112,21 +106,37 @@ func main() {
 		}
 		writeOutput(data, outPath)
 
-	case "upload":
+	case "send", "upload":
 		if len(cmdArgs) < 1 {
-			log.Fatal("usage: harry upload <local> [remote]")
+			log.Fatal("usage: harry send <local> [remote]")
 		}
 		localPath := cmdArgs[0]
-		remoteName := filepath.Base(localPath)
-		if len(cmdArgs) >= 2 {
-			remoteName = cmdArgs[1]
-		}
-		var uploadFlags byte
+
+		var sendFlags byte
 		if *force {
-			uploadFlags |= client.UploadForce
+			sendFlags |= client.SendForce
 		}
-		if err := c.UploadFile(localPath, remoteName, uploadFlags); err != nil {
-			log.Fatalf("upload failed: %v", err)
+
+		if localPath == "-" {
+			// Stdin mode — remote name is required
+			remoteName := ""
+			if len(cmdArgs) >= 2 {
+				remoteName = cmdArgs[1]
+			}
+			if remoteName == "" {
+				log.Fatal("usage: harry send - <remote>  (remote name required for stdin)")
+			}
+			if err := c.SendStream(os.Stdin, remoteName, sendFlags); err != nil {
+				log.Fatalf("send failed: %v", err)
+			}
+		} else {
+			remoteName := filepath.Base(localPath)
+			if len(cmdArgs) >= 2 {
+				remoteName = cmdArgs[1]
+			}
+			if err := c.SendFile(localPath, remoteName, sendFlags); err != nil {
+				log.Fatalf("send failed: %v", err)
+			}
 		}
 
 	case "fetch":
@@ -186,7 +196,6 @@ func writeOutput(data []byte, path string) {
 }
 
 // loadRC reads key=value pairs from an RC file.
-// Looks for ~/.harryrc by default.
 func loadRC(path string) map[string]string {
 	rc := make(map[string]string)
 

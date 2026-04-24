@@ -17,8 +17,7 @@ const (
 )
 
 // handleUploadStart begins a new file upload.
-// Payload format: [flags 1B][size 4B big-endian][sha1 20B][filename...]
-// Idempotent: if the session already has an upload for the same file, just ACK.
+// Payload format: [flags 1B][filename...]
 func (h *Handler) handleUploadStart(pkt *protocol.Packet, clientID byte) *protocol.Frame {
 	session := h.sessions.Get(clientID)
 	if session == nil {
@@ -31,18 +30,13 @@ func (h *Handler) handleUploadStart(pkt *protocol.Packet, clientID byte) *protoc
 		return errorFrame()
 	}
 
-	// Parse payload: [flags 1B][size 4B][sha1 20B][filename...]
-	if len(pkt.Payload) < 1+4+20+1 {
+	if len(pkt.Payload) < 2 {
 		log.Printf("client %d: upload rejected, payload too short", clientID)
 		return errorFrame()
 	}
 
 	flags := pkt.Payload[0]
-	expSize := uint32(pkt.Payload[1])<<24 | uint32(pkt.Payload[2])<<16 |
-		uint32(pkt.Payload[3])<<8 | uint32(pkt.Payload[4])
-	var expHash [20]byte
-	copy(expHash[:], pkt.Payload[5:25])
-	filename := string(pkt.Payload[25:])
+	filename := string(pkt.Payload[1:])
 
 	if filename == "" {
 		log.Printf("client %d: upload rejected, empty filename", clientID)
@@ -82,17 +76,13 @@ func (h *Handler) handleUploadStart(pkt *protocol.Packet, clientID byte) *protoc
 
 	session.UploadFile = clean
 	session.UploadBytes = 0
-	session.UploadExpSize = expSize
-	session.UploadExpHash = expHash
-	log.Printf("client %d: upload started: %q (expecting %d bytes, sha1=%x)",
-		clientID, clean, expSize, expHash)
+	log.Printf("client %d: upload started: %q", clientID, clean)
 
 	return &protocol.Frame{Payload: []byte("ok")}
 }
 
-// handleUploadDone is called when the client signals upload complete.
-// The server verifies the file against the expected size and SHA1
-// sent in the upload start.
+// handleUploadDone completes the current upload.
+// Payload: [size 4B][sha1 20B] — sent by client after all data chunks.
 func (h *Handler) handleUploadDone(pkt *protocol.Packet, clientID byte) *protocol.Frame {
 	session := h.sessions.Get(clientID)
 	if session == nil {
@@ -109,6 +99,17 @@ func (h *Handler) handleUploadDone(pkt *protocol.Packet, clientID byte) *protoco
 		return errorFrame()
 	}
 
+	if len(pkt.Payload) < 24 {
+		log.Printf("client %d: upload done payload too short", clientID)
+		return errorFrame()
+	}
+
+	// Parse expected size and hash from client
+	expSize := uint32(pkt.Payload[0])<<24 | uint32(pkt.Payload[1])<<16 |
+		uint32(pkt.Payload[2])<<8 | uint32(pkt.Payload[3])
+	var expHash [20]byte
+	copy(expHash[:], pkt.Payload[4:24])
+
 	// Read the uploaded file and verify
 	path := filepath.Join(h.config.UploadDir, session.UploadFile)
 	data, err := os.ReadFile(path)
@@ -119,23 +120,22 @@ func (h *Handler) handleUploadDone(pkt *protocol.Packet, clientID byte) *protoco
 
 	serverHash := sha1.Sum(data)
 	serverHex := hex.EncodeToString(serverHash[:])
+	expHex := hex.EncodeToString(expHash[:])
 
-	if serverHash != session.UploadExpHash {
-		expHex := hex.EncodeToString(session.UploadExpHash[:])
+	if serverHash != expHash {
 		log.Printf("client %d: upload hash mismatch: %q expected=%s got=%s",
 			clientID, session.UploadFile, expHex, serverHex)
 		session.UploadFile = ""
 		session.UploadBytes = 0
 		return &protocol.Frame{
 			Flags:   protocol.FlagError,
-			Payload: []byte(fmt.Sprintf("hash mismatch: expected=%s got=%s",
-				hex.EncodeToString(session.UploadExpHash[:]), serverHex)),
+			Payload: []byte(fmt.Sprintf("hash mismatch: expected=%s got=%s", expHex, serverHex)),
 		}
 	}
 
-	if uint32(len(data)) != session.UploadExpSize {
+	if uint32(len(data)) != expSize {
 		log.Printf("client %d: upload size mismatch: %q expected=%d got=%d",
-			clientID, session.UploadFile, session.UploadExpSize, len(data))
+			clientID, session.UploadFile, expSize, len(data))
 		session.UploadFile = ""
 		session.UploadBytes = 0
 		return &protocol.Frame{
