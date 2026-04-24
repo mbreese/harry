@@ -244,53 +244,74 @@ func (c *Client) StartRShell(pollInterval time.Duration) error {
 		}
 	}()
 
-	// Main loop: send shell output upstream, write server data to shell stdin
-	moreData := false
+	// Main loop: send shell output upstream, write server data to shell stdin.
+	// Poll aggressively (50ms) when active, back off to pollInterval when idle.
+	idleCount := 0
 	for {
+		// Check for shell output (non-blocking)
 		select {
 		case data, ok := <-shellCh:
 			if !ok {
-				// Shell exited
 				log.Printf("rshell: shell exited")
 				shell.Wait()
 				return nil
 			}
-			// Send shell output to server
 			frame, err := c.SendData(data)
 			if err != nil {
 				log.Printf("rshell: send error: %v", err)
 				continue
 			}
-			// Write any server data to shell stdin
 			if len(frame.Payload) > 0 {
 				shellIn.Write(frame.Payload)
 			}
-			moreData = frame.Flags&protocol.FlagMoreData != 0
+			idleCount = 0
+
+			// Drain any queued server data
+			for frame.Flags&protocol.FlagMoreData != 0 {
+				frame, err = c.Poll()
+				if err != nil {
+					break
+				}
+				if len(frame.Payload) > 0 {
+					shellIn.Write(frame.Payload)
+				}
+			}
+			continue
 
 		default:
-			if moreData {
-				frame, err := c.Poll()
+		}
+
+		// No shell output — poll server for incoming data
+		frame, err := c.Poll()
+		if err != nil {
+			log.Printf("rshell: poll error: %v", err)
+			time.Sleep(time.Second)
+			continue
+		}
+
+		if len(frame.Payload) > 0 {
+			shellIn.Write(frame.Payload)
+			idleCount = 0
+
+			// Drain queued data
+			for frame.Flags&protocol.FlagMoreData != 0 {
+				frame, err = c.Poll()
 				if err != nil {
-					log.Printf("rshell: poll error: %v", err)
-					continue
+					break
 				}
 				if len(frame.Payload) > 0 {
 					shellIn.Write(frame.Payload)
 				}
-				moreData = frame.Flags&protocol.FlagMoreData != 0
-			} else {
-				// Idle poll
-				time.Sleep(pollInterval)
-				frame, err := c.Poll()
-				if err != nil {
-					log.Printf("rshell: poll error: %v", err)
-					continue
-				}
-				if len(frame.Payload) > 0 {
-					shellIn.Write(frame.Payload)
-				}
-				moreData = frame.Flags&protocol.FlagMoreData != 0
 			}
+		} else {
+			idleCount++
+		}
+
+		// Adaptive sleep: fast when active, slow down when idle
+		if idleCount < 10 {
+			time.Sleep(50 * time.Millisecond)
+		} else {
+			time.Sleep(pollInterval)
 		}
 	}
 }
