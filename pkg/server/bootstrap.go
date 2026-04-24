@@ -154,26 +154,26 @@ func (h *Handler) handleBootstrap(qname, domain string, q *dns.Question, msg *dn
 
 // bootstrapHelp returns human-readable instructions for bootstrapping.
 func (h *Handler) bootstrapHelp() string {
-	d := h.config.Domain
 	return fmt.Sprintf(
-		`Run: R=RESOLVER eval "$(dig +short TXT boot.%s @$R|sed 's/^\"//;s/\"$//;s/\\\"//g')" -- Replace RESOLVER with your DNS server IP. Default is 8.8.8.8 if R is not set.`,
-		d,
+		`Run: dig +short TXT boot.%s @RESOLVER | xargs echo | sh  -- Set R=RESOLVER env var first if not using 8.8.8.8`,
+		h.config.Domain,
 	)
 }
 
 // stage1Script returns a tiny script (<255 chars) that fetches and evals stage 2.
-// Usage: R=8.8.8.8 eval $(dig +short TXT boot.<domain> @$R | tr -d '"')
+// Usage: dig +short TXT boot.<domain> @RESOLVER | xargs echo | sh
+// IMPORTANT: No double quotes allowed - dig would escape them, breaking xargs.
 func (h *Handler) stage1Script() string {
-	// Stage 1 fetches stage 2 script chunks, strips dig's quoting/escaping.
 	return fmt.Sprintf(
-		`eval "$(i=0;S=;while :;do C=$(dig +short TXT $i.s.boot.%s @${R:-8.8.8.8}|sed 's/^"//;s/"$//;s/\\\\"/"/g');[ -z "$C" ]&&break;S="${S}${C}";i=$((i+1));done;echo "$S")"`,
+		`i=0;S=;while :;do C=$(dig +short TXT $i.s.boot.%s @${R:-8.8.8.8}|xargs);case $C in ?*)S=${S}$C;i=$((i+1));;*)break;;esac;done;eval $S`,
 		h.config.Domain,
 	)
 }
 
 // stage2Script returns the full download script (can be any length, served in chunks).
+// IMPORTANT: No double quotes allowed - chunks go through xargs which can't handle escaped quotes.
 func (h *Handler) stage2Script() string {
-	return fmt.Sprintf(`R=${R:-8.8.8.8};D=%s;O=$(uname -s|tr A-Z a-z);A=$(uname -m);case $A in x86_64)A=amd64;;aarch64)A=arm64;;esac;F=harry-$O-$A;echo "downloading $F";N=$(dig +short TXT n.$F.boot.$D @$R|tr -d '" '|head -1);echo "$N chunks";i=0;B="";while [ $i -lt $N ];do C=$(dig +short TXT $i.$F.boot.$D @$R|tr -d '" ');B="$B$C";i=$((i+1));printf "\r%%d/%%d" $i $N;done;echo;printf "%%s" "$B"|base64 -d|gunzip>harry;chmod +x harry;echo "done: ./harry"`,
+	return fmt.Sprintf(`R=${R:-8.8.8.8};D=%s;O=$(uname -s|tr A-Z a-z);A=$(uname -m);case $A in x86_64)A=amd64;;aarch64)A=arm64;;esac;F=harry-$O-$A;echo downloading $F;N=$(dig +short TXT n.$F.boot.$D @$R|xargs|head -1);echo $N chunks;i=0;B=;while [ $i -lt $N ];do C=$(dig +short TXT $i.$F.boot.$D @$R|xargs echo|tr -d ' ');B=${B}$C;i=$((i+1));printf \r%%d/%%d $i $N;done;echo;printf %%s $B|base64 -d|gunzip>harry;chmod +x harry;echo done`,
 		h.config.Domain)
 }
 

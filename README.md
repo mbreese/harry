@@ -128,7 +128,7 @@ If you only have access to `dig`, you can bootstrap the full client over DNS:
 dig TXT boothelp.tunnel.example.com
 
 # Step 2: Run the bootstrap (set R to your resolver if not 8.8.8.8)
-R=8.8.8.8 eval "$(dig +short TXT boot.tunnel.example.com @$R | sed 's/^"//;s/"$//;s/\\"//g')"
+dig +short TXT boot.tunnel.example.com @8.8.8.8 | xargs echo | sh
 ```
 
 This will:

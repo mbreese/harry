@@ -93,8 +93,8 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	// Decode the tunnel query
 	pkt, clientID, err := h.qc.DecodeQuery(qname)
 	if err != nil {
-		log.Printf("decode error: %v (query: %s)", err, qname)
-		msg.Rcode = dns.RcodeServerFailure
+		// Not a valid tunnel query — likely stray DNS traffic
+		msg.Rcode = dns.RcodeNameError
 		w.WriteMsg(msg)
 		return
 	}
