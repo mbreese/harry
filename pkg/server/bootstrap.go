@@ -155,17 +155,18 @@ func (h *Handler) handleBootstrap(qname, domain string, q *dns.Question, msg *dn
 // bootstrapHelp returns human-readable instructions for bootstrapping.
 func (h *Handler) bootstrapHelp() string {
 	return fmt.Sprintf(
-		`Run: dig +short TXT boot.%s @RESOLVER | xargs echo | sh  -- Set R=RESOLVER env var first if not using 8.8.8.8`,
+		`Run: dig +short TXT boot.%s | xargs echo | sh`,
 		h.config.Domain,
 	)
 }
 
 // stage1Script returns a tiny script (<255 chars) that fetches and evals stage 2.
-// Usage: dig +short TXT boot.<domain> @RESOLVER | xargs echo | sh
+// Usage: dig +short TXT boot.<domain> | xargs echo | sh
 // IMPORTANT: No double quotes allowed - dig would escape them, breaking xargs.
+// Uses system default resolver (no @). Dig resolves via /etc/resolv.conf.
 func (h *Handler) stage1Script() string {
 	return fmt.Sprintf(
-		`i=0;S=;while :;do C=$(dig +short TXT $i.s.boot.%s @${R:-8.8.8.8}|xargs);case $C in ?*)S=${S}$C;i=$((i+1));;*)break;;esac;done;eval $S`,
+		`i=0;S=;while :;do C=$(dig +short TXT $i.s.boot.%s|xargs);case $C in ?*)S=${S}$C;i=$((i+1));;*)break;;esac;done;eval $S`,
 		h.config.Domain,
 	)
 }
@@ -173,8 +174,9 @@ func (h *Handler) stage1Script() string {
 // stage2Script returns the full download script (can be any length, served in chunks).
 // IMPORTANT: No double quotes allowed - chunks go through xargs which can't handle escaped quotes.
 // Uses sed to strip non-data characters instead of xargs (avoids quoting issues in eval context).
+// Uses system default resolver (no @).
 func (h *Handler) stage2Script() string {
-	return fmt.Sprintf(`R=${R:-8.8.8.8};D=%s;O=$(uname -s|tr A-Z a-z);A=$(uname -m);case $A in x86_64)A=amd64;;aarch64)A=arm64;;esac;F=harry-$O-$A;echo downloading $F;N=$(dig +short TXT n.$F.boot.$D @$R|head -1|sed s/[^0-9]//g);echo $N chunks;i=0;B=;while [ $i -lt $N ];do C=$(dig +short TXT $i.$F.boot.$D @$R|sed s/[^A-Za-z0-9+/=]//g);B=${B}$C;i=$((i+1));case $((i%%100)) in 0)echo $i/$N;;esac;done;echo;printf %%s $B|base64 -d|gunzip>harry;chmod +x harry;echo done`,
+	return fmt.Sprintf(`D=%s;O=$(uname -s|tr A-Z a-z);A=$(uname -m);case $A in x86_64)A=amd64;;aarch64)A=arm64;;esac;F=harry-$O-$A;echo downloading $F;N=$(dig +short TXT n.$F.boot.$D|head -1|sed s/[^0-9]//g);echo $N chunks;i=0;B=;while [ $i -lt $N ];do C=$(dig +short TXT $i.$F.boot.$D|sed s/[^A-Za-z0-9+/=]//g);B=${B}$C;i=$((i+1));case $((i%%100)) in 0)echo $i/$N;;esac;done;echo;printf %%s $B|base64 -d|gunzip>harry;chmod +x harry;echo done`,
 		h.config.Domain)
 }
 
