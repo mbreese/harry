@@ -18,10 +18,11 @@ type socks5Bridge struct {
 
 // proxyStream represents a single proxied TCP connection.
 type proxyStream struct {
-	id   uint16
-	conn net.Conn
-	mu   sync.Mutex
-	buf  []byte // data from remote, waiting to send to client
+	id           uint16
+	conn         net.Conn
+	mu           sync.Mutex
+	buf          []byte // data from remote, waiting to send to client
+	remoteClosed bool   // remote TCP connection has closed
 }
 
 func newSocks5Bridge() *socks5Bridge {
@@ -79,6 +80,9 @@ func (b *socks5Bridge) readStream(stream *proxyStream, channelID byte) {
 			stream.mu.Unlock()
 		}
 		if err != nil {
+			stream.mu.Lock()
+			stream.remoteClosed = true
+			stream.mu.Unlock()
 			log.Printf("ch %d: socks5 stream %d remote closed", channelID, stream.id)
 			return
 		}
@@ -101,12 +105,14 @@ func (b *socks5Bridge) writeToStream(id uint16, data []byte) error {
 
 // readFromStreams collects buffered data from all streams.
 // Each chunk in the response: [stream_id 2B][length 2B][data...]
+// A zero-length chunk signals that the remote closed the stream.
 // Multiple chunks can be packed into a single response.
 func (b *socks5Bridge) readFromStreams(maxBytes int) ([]byte, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	var result []byte
+	var closedStreams []uint16
 	moreData := false
 	headerSize := 4 // 2 stream_id + 2 length
 
@@ -138,6 +144,18 @@ func (b *socks5Bridge) readFromStreams(maxBytes int) ([]byte, bool) {
 			}
 
 			result = append(result, chunk...)
+		} else if stream.remoteClosed {
+			// Buffer drained and remote closed — send close signal
+			if len(result)+headerSize <= maxBytes {
+				chunk := make([]byte, headerSize)
+				chunk[0] = byte(stream.id >> 8)
+				chunk[1] = byte(stream.id)
+				// length = 0 signals stream close
+				closedStreams = append(closedStreams, stream.id)
+				result = append(result, chunk...)
+			} else {
+				moreData = true
+			}
 		}
 		stream.mu.Unlock()
 
@@ -145,6 +163,11 @@ func (b *socks5Bridge) readFromStreams(maxBytes int) ([]byte, bool) {
 			moreData = true
 			break
 		}
+	}
+
+	// Remove fully closed streams
+	for _, id := range closedStreams {
+		delete(b.streams, id)
 	}
 
 	return result, moreData

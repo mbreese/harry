@@ -185,11 +185,25 @@ func (c *Client) StartSocks5(listenAddr string, pollInterval time.Duration) erro
 
 // routeDownstream routes server response data to the correct browser connections.
 // Data format from server: [stream_id 2B][length 2B][data...] repeated.
+// A zero-length chunk signals that the remote closed the stream.
 func (c *Client) routeDownstream(data []byte, streams map[uint16]*socks5Stream, mu *sync.Mutex) {
 	for len(data) >= 4 {
 		streamID := uint16(data[0])<<8 | uint16(data[1])
 		length := int(data[2])<<8 | int(data[3])
 		data = data[4:]
+
+		if length == 0 {
+			// Remote closed — close the browser-side socket
+			mu.Lock()
+			stream, ok := streams[streamID]
+			if ok {
+				stream.conn.Close()
+				delete(streams, streamID)
+				c.vlog("socks5: stream %d remote closed", streamID)
+			}
+			mu.Unlock()
+			continue
+		}
 
 		if length > len(data) {
 			length = len(data)
