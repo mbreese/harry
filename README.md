@@ -72,7 +72,6 @@ Flags can be set on the command line or in `~/.harryrc`:
 ```
 domain=tunnel.example.com
 password=shared-secret
-resolver=8.8.8.8:53
 ```
 
 Command line flags override RC file values. Use `-rc /path/to/file` for a custom RC file location.
@@ -83,26 +82,31 @@ Command line flags override RC file values. Use `-rc /path/to/file` for a custom
 # List available files on the server
 harry list
 
-# Download a file (output to stdout)
-harry download myfile.txt
+# Receive a file from the server
+harry recv myfile.txt
 
-# Download a file to disk
-harry -o myfile.txt download myfile.txt
+# Receive to a different local name
+harry recv myfile.txt localname.txt
 
-# Upload a file
-harry upload /path/to/local.txt
+# Receive to stdout
+harry recv myfile.txt -
 
-# Upload with a different remote name
-harry upload /path/to/local.txt remote-name.txt
+# Send a file to the server
+harry send /path/to/local.txt
 
-# Force overwrite existing file on server
-harry -f upload /path/to/local.txt
+# Send with a different remote name
+harry send /path/to/local.txt remote-name.txt
 
-# Fetch a URL via the server (output to stdout)
+# Send from stdin
+echo "hello" | harry send - greeting.txt
+cat data.bin | harry send - data.bin
+
+# Force overwrite existing file
+harry -f send /path/to/local.txt
+harry -f recv myfile.txt
+
+# Fetch a URL via the server (stdout)
 harry fetch http://example.com
-
-# Fetch a URL to a file
-harry -o page.html fetch http://example.com
 
 # Fetch without following redirects
 harry -no-redirect fetch http://google.com
@@ -120,8 +124,7 @@ harry poll
 | `-password` | | Shared secret |
 | `-resolver` | (system) | DNS resolver address (reads `/etc/resolv.conf` by default) |
 | `-poll` | `30s` | Idle poll interval |
-| `-o` | (local name) | Output file for download (stdout for fetch) |
-| `-f` | `false` | Force overwrite existing file on server |
+| `-f` | `false` | Force overwrite existing file |
 | `-no-redirect` | `false` | Don't follow HTTP redirects |
 | `-rc` | `~/.harryrc` | RC file path |
 
