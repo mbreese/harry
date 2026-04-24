@@ -21,6 +21,24 @@ type Session struct {
 	// Upload state
 	UploadFile  string // current upload filename (empty = no active upload)
 	UploadBytes int    // bytes received so far
+
+	// Deduplication: track last processed counter to detect DNS retries
+	lastCounter uint32
+	counterSeen bool
+}
+
+// isDuplicate returns true if this request counter was already processed.
+// Call this for state-mutating commands (data, upload) to prevent
+// DNS resolver retries from duplicating side effects.
+func (s *Session) isDuplicate(counter uint32) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.counterSeen && s.lastCounter == counter {
+		return true
+	}
+	s.lastCounter = counter
+	s.counterSeen = true
+	return false
 }
 
 // SessionManager manages client sessions.

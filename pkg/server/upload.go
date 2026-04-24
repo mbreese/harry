@@ -13,6 +13,7 @@ import (
 )
 
 // handleUploadStart begins a new file upload.
+// Idempotent: if the session already has an upload for the same file, just ACK.
 func (h *Handler) handleUploadStart(pkt *protocol.Packet, clientID byte) *protocol.Frame {
 	session := h.sessions.Get(clientID)
 	if session == nil {
@@ -37,6 +38,11 @@ func (h *Handler) handleUploadStart(pkt *protocol.Packet, clientID byte) *protoc
 		return errorFrame()
 	}
 
+	// Idempotent: if already uploading the same file, just ACK (DNS retry)
+	if session.UploadFile == clean {
+		return &protocol.Frame{Payload: []byte("ok")}
+	}
+
 	path := filepath.Join(h.config.UploadDir, clean)
 	f, err := os.Create(path)
 	if err != nil {
@@ -59,6 +65,11 @@ func (h *Handler) handleUploadDone(pkt *protocol.Packet, clientID byte) *protoco
 		return errorFrame()
 	}
 	session.LastSeen = now()
+
+	// Deduplicate DNS retries
+	if session.isDuplicate(pkt.Counter) {
+		return &protocol.Frame{Payload: []byte("ok")}
+	}
 
 	if session.UploadFile == "" {
 		log.Printf("client %d: upload done but no active upload", clientID)

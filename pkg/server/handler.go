@@ -280,6 +280,11 @@ func (h *Handler) handleData(pkt *protocol.Packet, clientID byte) *protocol.Fram
 	}
 	session.LastSeen = now()
 
+	// Deduplicate retried requests (DNS resolver may retry)
+	if session.isDuplicate(pkt.Counter) {
+		return &protocol.Frame{}
+	}
+
 	// If an upload is active, write data to the upload file
 	if session.UploadFile != "" && len(pkt.Payload) > 0 {
 		if err := h.appendUpload(session, pkt.Payload); err != nil {
