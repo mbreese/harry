@@ -136,22 +136,28 @@ func (c *Client) recvTransfer(initial *protocol.Frame) ([]byte, error) {
 	// Multi-chunk: collect all chunks by index
 	chunks := make([][]byte, initial.ChunkTotal)
 	chunks[0] = initial.Payload
+	showProgress(1, initial.ChunkTotal)
 
 	for idx := uint16(1); idx < initial.ChunkTotal; idx++ {
 		frame, err := c.pollAck(initial.TransferID, idx-1)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "\n")
 			return nil, fmt.Errorf("transfer %d chunk %d/%d: %w",
 				initial.TransferID, idx, initial.ChunkTotal, err)
 		}
 		if frame.Flags&protocol.FlagError != 0 {
+			fmt.Fprintf(os.Stderr, "\n")
 			return nil, fmt.Errorf("transfer %d chunk %d: server error", initial.TransferID, idx)
 		}
 		if frame.ChunkIdx != idx {
+			fmt.Fprintf(os.Stderr, "\n")
 			return nil, fmt.Errorf("transfer %d: expected chunk %d, got %d",
 				initial.TransferID, idx, frame.ChunkIdx)
 		}
 		chunks[idx] = frame.Payload
+		showProgress(idx+1, initial.ChunkTotal)
 	}
+	fmt.Fprintf(os.Stderr, "\n")
 
 	// Reassemble
 	var result []byte
@@ -328,8 +334,10 @@ func (c *Client) UploadFile(localPath, remoteName string) error {
 		}
 
 		sent = end
-		log.Printf("upload: %d/%d bytes", sent, len(data))
+		pct := float64(sent) / float64(len(data))
+		showProgressBytes(sent, len(data), pct)
 	}
+	fmt.Fprintf(os.Stderr, "\n")
 
 	// Signal upload complete with SHA1 hash for verification
 	hash := sha1.Sum(data)
@@ -450,6 +458,23 @@ func (c *Client) sendPacket(pkt *protocol.Packet, clientID byte) (*protocol.Fram
 	}
 
 	return frame, nil
+}
+
+// showProgress renders a progress bar to stderr for chunk-based transfers.
+func showProgress(current, total uint16) {
+	pct := float64(current) / float64(total)
+	barWidth := 30
+	filled := int(pct * float64(barWidth))
+	bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+	fmt.Fprintf(os.Stderr, "\r[%s] %d/%d chunks (%.0f%%)", bar, current, total, pct*100)
+}
+
+// showProgressBytes renders a progress bar for byte-based transfers (uploads).
+func showProgressBytes(sent, total int, pct float64) {
+	barWidth := 30
+	filled := int(pct * float64(barWidth))
+	bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
+	fmt.Fprintf(os.Stderr, "\r[%s] %d/%d bytes (%.0f%%)", bar, sent, total, pct*100)
 }
 
 // systemResolver reads the first nameserver from /etc/resolv.conf.
