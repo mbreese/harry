@@ -37,6 +37,7 @@ func main() {
 	pollInterval := flag.Duration("poll", 30*time.Second, "idle poll interval")
 	noRedirect := flag.Bool("no-redirect", false, "don't follow HTTP redirects (for fetch)")
 	force := flag.Bool("f", false, "force overwrite existing file")
+	verbose := flag.Bool("v", false, "verbose debug logging")
 	socksAddr := flag.String("socks-addr", "127.0.0.1:1080", "SOCKS5 listen address")
 	rcFile := flag.String("rc", "", "RC file path (default: ~/.harryrc)")
 
@@ -78,6 +79,7 @@ func main() {
 		Password:     *password,
 		Resolver:     *resolver,
 		PollInterval: *pollInterval,
+		Verbose:      *verbose,
 	}
 
 	c, err := client.New(cfg)

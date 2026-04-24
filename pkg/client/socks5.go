@@ -73,7 +73,7 @@ func (c *Client) StartSocks5(listenAddr string, pollInterval time.Duration) erro
 				streams[id] = stream
 				mu.Unlock()
 
-				log.Printf("socks5: stream %d connected", id)
+				c.vlog("socks5: stream %d connected", id)
 
 				// Read from browser in background
 				go func() {

