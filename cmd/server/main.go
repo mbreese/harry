@@ -18,6 +18,7 @@ func main() {
 	fileDir := flag.String("files", "./files", "directory for downloadable files")
 	uploadDir := flag.String("uploads", "./uploads", "directory for uploaded files")
 	ttl := flag.Uint("ttl", 1, "DNS TTL")
+	verbose := flag.Bool("verbose", false, "log all queries including stray traffic")
 	flag.Parse()
 
 	if *domain == "" || *password == "" {
@@ -36,6 +37,7 @@ func main() {
 		UploadDir: *uploadDir,
 		Listen:    *listen,
 		TTL:       uint32(*ttl),
+		Verbose:   *verbose,
 	}
 
 	handler, err := server.New(cfg)

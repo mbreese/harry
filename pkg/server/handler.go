@@ -30,6 +30,7 @@ type Config struct {
 	UploadDir string // directory for uploaded files
 	Listen    string // listen address (e.g., ":53")
 	TTL       uint32 // DNS TTL (default 1)
+	Verbose   bool   // log all queries including stray traffic
 }
 
 // New creates a new tunnel server handler.
@@ -65,9 +66,13 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	q := r.Question[0]
+	src := w.RemoteAddr().String()
 
 	// Only handle TXT queries under our domain
 	if q.Qtype != dns.TypeTXT {
+		if h.config.Verbose {
+			log.Printf("[%s] ignoring non-TXT query: %s %s", src, dns.TypeToString[q.Qtype], q.Name)
+		}
 		msg.Rcode = dns.RcodeNameError
 		w.WriteMsg(msg)
 		return
@@ -79,6 +84,9 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	domainLower := strings.ToLower(h.config.Domain)
 
 	if !strings.HasSuffix(qnameLower, "."+domainLower) && qnameLower != domainLower {
+		if h.config.Verbose {
+			log.Printf("[%s] ignoring query outside domain: %s", src, qname)
+		}
 		msg.Rcode = dns.RcodeNameError
 		w.WriteMsg(msg)
 		return
@@ -86,6 +94,9 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	// Handle bootstrap requests (plaintext, no encryption)
 	if h.handleBootstrap(qnameLower, domainLower, &q, msg) {
+		if h.config.Verbose {
+			log.Printf("[%s] bootstrap: %s", src, qname)
+		}
 		w.WriteMsg(msg)
 		return
 	}
@@ -93,7 +104,9 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	// Decode the tunnel query
 	pkt, clientID, err := h.qc.DecodeQuery(qname)
 	if err != nil {
-		// Not a valid tunnel query — likely stray DNS traffic
+		if h.config.Verbose {
+			log.Printf("[%s] stray query: %s", src, qname)
+		}
 		msg.Rcode = dns.RcodeNameError
 		w.WriteMsg(msg)
 		return
@@ -112,7 +125,7 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	// Process command
-	resp := h.processCommand(pkt, clientID)
+	resp := h.processCommand(pkt, clientID, src)
 
 	// Encrypt response payload
 	var respData []byte
@@ -147,10 +160,10 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 }
 
 // processCommand handles a decoded packet and returns a response.
-func (h *Handler) processCommand(pkt *protocol.Packet, clientID byte) *protocol.Response {
+func (h *Handler) processCommand(pkt *protocol.Packet, clientID byte, src string) *protocol.Response {
 	switch pkt.Cmd {
 	case protocol.CmdConnect:
-		return h.handleConnect()
+		return h.handleConnect(src)
 	case protocol.CmdPoll:
 		return h.handlePoll(clientID)
 	case protocol.CmdData:
@@ -173,13 +186,13 @@ func (h *Handler) processCommand(pkt *protocol.Packet, clientID byte) *protocol.
 	}
 }
 
-func (h *Handler) handleConnect() *protocol.Response {
+func (h *Handler) handleConnect(src string) *protocol.Response {
 	session, err := h.sessions.NewSession()
 	if err != nil {
-		log.Printf("connect error: %v", err)
+		log.Printf("[%s] connect error: %v", src, err)
 		return &protocol.Response{Flags: protocol.FlagError}
 	}
-	log.Printf("new client connected: ID=%d", session.ID)
+	log.Printf("[%s] new client connected: ID=%d", src, session.ID)
 	return &protocol.Response{
 		Payload: []byte{session.ID},
 	}
