@@ -21,7 +21,7 @@ On connect, the client auto-tunes the maximum TXT response size (255 → 512 →
 ```
 <block4>.<block3>.<block2>.<block1>.<domain>
 
-Each block is base36-encoded. Client ID (0-63) encoded in block 1-3 lengths.
+Each block is base36-encoded. Channel ID (0-63) encoded in block 1-3 lengths.
 Total query: 253 chars max.
 
 Decoded payload (after base36 decode):
@@ -66,9 +66,8 @@ make test
 
 - `bin/harry-server` — the DNS server
 - `bin/harry` — the client
-- `bin/harry-darwin-arm64` — stripped client for macOS ARM
-- `bin/harry-linux-amd64` — stripped client for Linux x86_64
-- `bin/harry-linux-arm64` — stripped client for Linux ARM
+- `make bootstrap` — cross-compile stripped clients (`bin/harry-darwin-arm64`, `bin/harry-linux-amd64`, `bin/harry-linux-arm64`)
+- `make release` — cross-compile both client and server for all platforms
 
 ## Server
 
@@ -150,7 +149,9 @@ harry -socks-addr 0.0.0.0:8080 socks5
 curl --socks5-hostname 127.0.0.1:1080 http://example.com
 
 # Reverse shell (expose local shell to server)
+# Server must be started with: harry-server -rshell 127.0.0.1:4444 ...
 harry rshell
+# Then on the server: nc localhost 4444
 
 # Bidirectional pipe (stdin/stdout)
 harry pipe
@@ -166,6 +167,7 @@ harry poll
 | `-resolver` | (system) | DNS resolver address (reads `/etc/resolv.conf` by default) |
 | `-poll` | `30s` | Idle poll interval |
 | `-f` | `false` | Force overwrite existing file |
+| `-v` | `false` | Verbose debug logging |
 | `-no-redirect` | `false` | Don't follow HTTP redirects |
 | `-socks-addr` | `127.0.0.1:1080` | SOCKS5 listen address |
 | `-rc` | `~/.harryrc` | RC file path |
@@ -187,7 +189,22 @@ This will:
 2. Download the correct binary in chunks via DNS TXT queries
 3. Decompress and save as `./harry`
 
-The server must have the platform binaries in its files directory (`harry-darwin-arm64`, `harry-linux-amd64`, `harry-linux-arm64`). Run `make bootstrap` and copy them to the files directory.
+The server must have the platform binaries in its files directory. Run `make bootstrap` and copy them:
+
+```sh
+cp bin/harry-darwin-arm64 bin/harry-linux-amd64 bin/harry-linux-arm64 files/
+```
+
+### Firefox SOCKS5 Setup
+
+To use the SOCKS5 proxy with Firefox:
+
+1. Open **Settings** → **General** → **Network Settings** → **Settings...**
+2. Select **Manual proxy configuration**
+3. **SOCKS Host**: `127.0.0.1`, **Port**: `1080`
+4. Select **SOCKS v5**
+5. Check **Proxy DNS when using SOCKS v5** (important — sends domain names through the tunnel)
+6. Click **OK**
 
 ## DNS Setup
 
@@ -233,7 +250,7 @@ Responses use a wire frame format with CRC32 integrity checks, transfer IDs, and
 
 **Known limitations:**
 - **Traffic analysis**: An observer can see DNS query frequency and sizes to `*.tunnel.example.com`, and can infer activity patterns (uploads vs downloads, approximate file sizes) even without reading payloads
-- **Session exhaustion**: The server supports 64 concurrent sessions. There is no authentication on the initial connect — anyone who knows the domain can consume a session slot (though they cannot decrypt the response without the password)
+- **Channel exhaustion**: The server supports 64 concurrent channels. There is no authentication on the initial connect — anyone who knows the domain can consume a channel slot (though they cannot decrypt the response without the password)
 - **Bootstrap exposure**: Client binaries are served in cleartext over DNS. An observer can see what software is being downloaded during bootstrap
 - **No rate limiting**: Failed decryption attempts (wrong password) are not rate-limited. The server rejects them but does not track or block repeated failures
 - **Shared secret**: All clients use the same password. There is no per-client authentication or key rotation
