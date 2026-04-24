@@ -114,7 +114,7 @@ func (c *Client) StartSocks5(listenAddr string, pollInterval time.Duration) erro
 		for _, stream := range streams {
 			stream.mu.Lock()
 			if len(stream.buf) > 0 {
-				maxChunk := c.MaxUpstreamChunk() - 2 // -2 for stream ID prefix
+				maxChunk := c.MaxUpstreamChunk() - 4 // -4 for stream ID + length prefix
 				if maxChunk <= 0 {
 					stream.mu.Unlock()
 					continue
@@ -123,10 +123,12 @@ func (c *Client) StartSocks5(listenAddr string, pollInterval time.Duration) erro
 				if n > maxChunk {
 					n = maxChunk
 				}
-				chunk := make([]byte, 2+n)
+				chunk := make([]byte, 4+n)
 				chunk[0] = byte(stream.id >> 8)
 				chunk[1] = byte(stream.id)
-				copy(chunk[2:], stream.buf[:n])
+				chunk[2] = byte(n >> 8)
+				chunk[3] = byte(n)
+				copy(chunk[4:], stream.buf[:n])
 				stream.buf = stream.buf[n:]
 				upstreamData = chunk
 				stream.mu.Unlock()
@@ -183,24 +185,28 @@ func (c *Client) StartSocks5(listenAddr string, pollInterval time.Duration) erro
 	}
 }
 
-// routeDownstream routes server response data to the correct browser connection.
-// Data format from server: [stream_id 2B][data...]
+// routeDownstream routes server response data to the correct browser connections.
+// Data format from server: [stream_id 2B][length 2B][data...] repeated.
 func (c *Client) routeDownstream(data []byte, streams map[uint16]*socks5Stream, mu *sync.Mutex) {
-	if len(data) < 2 {
-		return
+	for len(data) >= 4 {
+		streamID := uint16(data[0])<<8 | uint16(data[1])
+		length := int(data[2])<<8 | int(data[3])
+		data = data[4:]
+
+		if length > len(data) {
+			length = len(data)
+		}
+
+		mu.Lock()
+		stream, ok := streams[streamID]
+		mu.Unlock()
+
+		if ok {
+			stream.conn.Write(data[:length])
+		}
+
+		data = data[length:]
 	}
-
-	streamID := uint16(data[0])<<8 | uint16(data[1])
-
-	mu.Lock()
-	stream, ok := streams[streamID]
-	mu.Unlock()
-
-	if !ok {
-		return
-	}
-
-	stream.conn.Write(data[2:])
 }
 
 // handleSocks5Conn handles the SOCKS5 handshake for a new connection.

@@ -100,20 +100,20 @@ func (b *socks5Bridge) writeToStream(id uint16, data []byte) error {
 }
 
 // readFromStreams collects buffered data from all streams.
-// Returns data prefixed with [stream_id 2B] for each chunk,
-// packed into a single response up to maxBytes.
+// Each chunk in the response: [stream_id 2B][length 2B][data...]
+// Multiple chunks can be packed into a single response.
 func (b *socks5Bridge) readFromStreams(maxBytes int) ([]byte, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	var result []byte
 	moreData := false
+	headerSize := 4 // 2 stream_id + 2 length
 
 	for _, stream := range b.streams {
 		stream.mu.Lock()
 		if len(stream.buf) > 0 {
-			// Each chunk: [stream_id 2B][data...]
-			available := maxBytes - len(result) - 2 // 2 bytes for stream ID
+			available := maxBytes - len(result) - headerSize
 			if available <= 0 {
 				stream.mu.Unlock()
 				moreData = true
@@ -125,10 +125,12 @@ func (b *socks5Bridge) readFromStreams(maxBytes int) ([]byte, bool) {
 				moreData = true
 			}
 
-			chunk := make([]byte, 2+n)
+			chunk := make([]byte, headerSize+n)
 			chunk[0] = byte(stream.id >> 8)
 			chunk[1] = byte(stream.id)
-			copy(chunk[2:], stream.buf[:n])
+			chunk[2] = byte(n >> 8)
+			chunk[3] = byte(n)
+			copy(chunk[4:], stream.buf[:n])
 			stream.buf = stream.buf[n:]
 
 			if len(stream.buf) > 0 {
@@ -139,7 +141,7 @@ func (b *socks5Bridge) readFromStreams(maxBytes int) ([]byte, bool) {
 		}
 		stream.mu.Unlock()
 
-		if len(result) >= maxBytes-2 {
+		if len(result) >= maxBytes-headerSize {
 			moreData = true
 			break
 		}

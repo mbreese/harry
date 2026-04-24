@@ -333,10 +333,15 @@ func (h *Handler) handleData(pkt *protocol.Packet, clientID byte) *protocol.Fram
 	}
 
 	// Route data to the appropriate destination
-	if session.Socks5 != nil && len(pkt.Payload) > 2 {
-		// SOCKS5: parse stream ID and route to stream
+	if session.Socks5 != nil && len(pkt.Payload) >= 4 {
+		// SOCKS5: parse [stream_id 2B][length 2B][data...]
 		streamID := uint16(pkt.Payload[0])<<8 | uint16(pkt.Payload[1])
-		if err := session.Socks5.writeToStream(streamID, pkt.Payload[2:]); err != nil {
+		length := int(pkt.Payload[2])<<8 | int(pkt.Payload[3])
+		data := pkt.Payload[4:]
+		if length > len(data) {
+			length = len(data)
+		}
+		if err := session.Socks5.writeToStream(streamID, data[:length]); err != nil {
 			if h.config.Verbose {
 				log.Printf("client %d: socks5 stream %d write error: %v", clientID, streamID, err)
 			}
