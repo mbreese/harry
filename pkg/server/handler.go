@@ -163,6 +163,11 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		pkt.Payload = decrypted
 	}
 
+	if h.config.Verbose {
+		log.Printf("[%s] recv client=%d cmd=%c counter=%d payload=%d",
+			src, clientID, pkt.Cmd, pkt.Counter, len(pkt.Payload))
+	}
+
 	// Process command — returns a frame ready for encoding
 	frame := h.processCommand(pkt, clientID, src)
 
@@ -179,7 +184,19 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	// Build wire frame with CRC and encode as TXT record
-	txt := encoding.Encode(protocol.MarshalFrame(frame))
+	wireFrame := protocol.MarshalFrame(frame)
+	txt := encoding.Encode(wireFrame)
+
+	if h.config.Verbose {
+		// Extract CRC from wire frame for logging
+		var crc uint32
+		if len(wireFrame) >= 4 {
+			crc = uint32(wireFrame[0])<<24 | uint32(wireFrame[1])<<16 | uint32(wireFrame[2])<<8 | uint32(wireFrame[3])
+		}
+		log.Printf("[%s] send client=%d transfer=%d chunk=%d/%d flags=%02x crc=%08x payload=%d encoded=%d",
+			src, clientID, frame.TransferID, frame.ChunkIdx, frame.ChunkTotal,
+			frame.Flags, crc, len(frame.Payload), len(txt))
+	}
 
 	rr := &dns.TXT{
 		Hdr: dns.RR_Header{
