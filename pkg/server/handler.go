@@ -164,13 +164,12 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	// Process command
-	resp, session := h.processCommand(pkt, clientID, src)
+	resp, _ := h.processCommand(pkt, clientID, src)
 
-	// Get sequence number
-	var seq uint16
-	if session != nil {
-		seq = session.NextSeq()
-	}
+	// Use the client's request counter as the response sequence number.
+	// This ensures DNS resolver retries (which resend the same counter)
+	// produce responses with the same seq, preventing sequence drift.
+	seq := uint16(pkt.Counter & 0xFFFF)
 
 	// Encrypt response payload
 	var encPayload []byte

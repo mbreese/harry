@@ -31,10 +31,9 @@ type Client struct {
 	config      *Config
 	cipher      *crypto.Cipher
 	qc          *protocol.QueryConfig
-	clientID    byte
-	counter     uint32
-	tuneSize    int    // negotiated response size
-	expectedSeq uint16 // next expected sequence number
+	clientID byte
+	counter  uint32
+	tuneSize int // negotiated response size
 
 	mu sync.Mutex
 }
@@ -423,11 +422,11 @@ func (c *Client) sendPacket(pkt *protocol.Packet, clientID byte) (*protocol.Resp
 		return nil, fmt.Errorf("response frame: %w", err)
 	}
 
-	// Verify sequence number
-	if seq != c.expectedSeq {
-		return nil, fmt.Errorf("sequence mismatch: expected %d, got %d", c.expectedSeq, seq)
+	// Verify sequence number matches our request counter
+	expectedSeq := uint16(pkt.Counter & 0xFFFF)
+	if seq != expectedSeq {
+		return nil, fmt.Errorf("sequence mismatch: expected %d, got %d", expectedSeq, seq)
 	}
-	c.expectedSeq++
 
 	resp2 := &protocol.Response{Flags: flags}
 
