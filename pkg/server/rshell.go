@@ -11,11 +11,13 @@ import (
 
 // rshellBridge manages a TCP listener that bridges to a client's reverse shell.
 type rshellBridge struct {
-	listener net.Listener
-	session  *Session
-	mu       sync.Mutex
-	conn     net.Conn // active TCP connection (only one at a time)
-	buf      []byte   // data from TCP waiting to be sent to client
+	listener  net.Listener
+	session   *Session
+	mu        sync.Mutex
+	conn      net.Conn // active TCP connection (only one at a time)
+	buf       []byte   // data from TCP waiting to be sent to client
+	tcpRecv   int64    // bytes received from TCP (to send to client)
+	tcpSent   int64    // bytes sent to TCP (from client)
 }
 
 // handleRShell starts a reverse shell bridge for the client.
@@ -112,10 +114,14 @@ func (b *rshellBridge) readTCP(clientID byte) {
 		if n > 0 {
 			b.mu.Lock()
 			b.buf = append(b.buf, buf[:n]...)
+			b.tcpRecv += int64(n)
+			log.Printf("client %d: rshell tcp_recv=%d tcp_sent=%d", clientID, b.tcpRecv, b.tcpSent)
 			b.mu.Unlock()
 		}
 		if err != nil {
-			log.Printf("client %d: rshell TCP read done: %v", clientID, err)
+			b.mu.Lock()
+			log.Printf("client %d: rshell TCP closed (tcp_recv=%d tcp_sent=%d)", clientID, b.tcpRecv, b.tcpSent)
+			b.mu.Unlock()
 			return
 		}
 	}
@@ -131,7 +137,10 @@ func (b *rshellBridge) WriteToTCP(data []byte) error {
 		return fmt.Errorf("no TCP connection")
 	}
 
-	_, err := conn.Write(data)
+	n, err := conn.Write(data)
+	b.mu.Lock()
+	b.tcpSent += int64(n)
+	b.mu.Unlock()
 	return err
 }
 

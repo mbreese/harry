@@ -211,13 +211,20 @@ func (c *Client) StartRShell(pollInterval time.Duration) error {
 
 	log.Printf("rshell: local shell started (pid %d)", shell.Process.Pid)
 
-	// Handle Ctrl-C gracefully
+	// Handle Ctrl-C — kill shell immediately by closing pipes and killing process
+	done := make(chan struct{})
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		<-sigCh
-		log.Printf("rshell: interrupted, killing shell")
-		shell.Process.Kill()
+		select {
+		case <-sigCh:
+			log.Printf("rshell: interrupted, killing shell")
+			shellIn.Close()
+			shell.Process.Kill()
+			shell.Wait()
+			close(done)
+		case <-done:
+		}
 	}()
 	defer signal.Stop(sigCh)
 
@@ -239,16 +246,25 @@ func (c *Client) StartRShell(pollInterval time.Duration) error {
 		}
 	}()
 
-	// Main loop: send shell output upstream, write server data to shell stdin.
-	// Poll aggressively (50ms) when active, back off to pollInterval when idle.
+	// Main loop with byte counters
+	var totalSent, totalRecv int64
 	idleCount := 0
 	for {
+		// Check for interrupt
+		select {
+		case <-done:
+			log.Printf("rshell: total sent=%d recv=%d", totalSent, totalRecv)
+			return nil
+		default:
+		}
+
 		// Check for shell output (non-blocking)
 		select {
 		case data, ok := <-shellCh:
 			if !ok {
-				log.Printf("rshell: shell exited")
+				log.Printf("rshell: shell exited (sent=%d recv=%d)", totalSent, totalRecv)
 				shell.Wait()
+				close(done)
 				return nil
 			}
 			downstream, _, err := c.SendDataChunked(data)
@@ -256,9 +272,12 @@ func (c *Client) StartRShell(pollInterval time.Duration) error {
 				log.Printf("rshell: send error: %v", err)
 				continue
 			}
+			totalSent += int64(len(data))
 			if len(downstream) > 0 {
 				shellIn.Write(downstream)
+				totalRecv += int64(len(downstream))
 			}
+			log.Printf("rshell: sent=%d recv=%d", totalSent, totalRecv)
 			idleCount = 0
 			continue
 
@@ -275,6 +294,8 @@ func (c *Client) StartRShell(pollInterval time.Duration) error {
 
 		if len(frame.Payload) > 0 {
 			shellIn.Write(frame.Payload)
+			totalRecv += int64(len(frame.Payload))
+			log.Printf("rshell: sent=%d recv=%d", totalSent, totalRecv)
 			idleCount = 0
 
 			// Drain queued data
@@ -285,6 +306,7 @@ func (c *Client) StartRShell(pollInterval time.Duration) error {
 				}
 				if len(frame.Payload) > 0 {
 					shellIn.Write(frame.Payload)
+					totalRecv += int64(len(frame.Payload))
 				}
 			}
 		} else {
