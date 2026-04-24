@@ -18,7 +18,7 @@ import (
 const usage = `Usage: harry [flags] <command> [args]
 
 Commands:
-  download <file>            Download a file from the server (saves locally)
+  download <remote> [local]   Download a file from the server
   upload <local> [remote]    Upload a file to the server
   list                       List available files on the server
   fetch <url>                Fetch a URL via the server (stdout)
@@ -95,7 +95,7 @@ func main() {
 	switch cmd {
 	case "download":
 		if len(cmdArgs) < 1 {
-			log.Fatal("usage: harry download <filename>")
+			log.Fatal("usage: harry download <remote> [local]")
 		}
 		data, err := c.RequestFile(cmdArgs[0])
 		if err != nil {
@@ -103,7 +103,11 @@ func main() {
 		}
 		outPath := *output
 		if outPath == "" {
-			outPath = filepath.Base(cmdArgs[0])
+			if len(cmdArgs) >= 2 {
+				outPath = cmdArgs[1]
+			} else {
+				outPath = filepath.Base(cmdArgs[0])
+			}
 		}
 		writeOutput(data, outPath)
 
