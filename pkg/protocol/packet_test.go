@@ -46,24 +46,19 @@ func TestQueryRoundTrip(t *testing.T) {
 		qc := &QueryConfig{Domain: domain}
 
 		for _, clientID := range []byte{0, 1, 7, 31, 63} {
-			pkt := &Packet{
-				Cmd:     CmdData,
-				Counter: 42,
-				Payload: []byte("test"),
-			}
+			// EncodeQuery now takes raw bytes (e.g., encrypted data)
+			data := []byte("test encrypted data")
 
-			query, err := qc.EncodeQuery(pkt, clientID)
+			query, err := qc.EncodeQuery(data, clientID)
 			if err != nil {
 				t.Fatalf("domain=%s clientID=%d: encode error: %v", domain, clientID, err)
 			}
 
-			// Verify total length
 			if len(query) > maxDomainLen {
 				t.Fatalf("domain=%s clientID=%d: query too long: %d", domain, clientID, len(query))
 			}
 
-			// Decode
-			gotPkt, gotID, err := qc.DecodeQuery(query)
+			gotData, gotID, err := qc.DecodeQuery(query)
 			if err != nil {
 				t.Fatalf("domain=%s clientID=%d: decode error: %v\n  query: %s", domain, clientID, err, query)
 			}
@@ -71,8 +66,8 @@ func TestQueryRoundTrip(t *testing.T) {
 			if gotID != clientID {
 				t.Fatalf("domain=%s: client ID mismatch: %d != %d", domain, gotID, clientID)
 			}
-			if gotPkt.Cmd != pkt.Cmd || gotPkt.Counter != pkt.Counter || !bytes.Equal(gotPkt.Payload, pkt.Payload) {
-				t.Fatalf("domain=%s clientID=%d: packet mismatch", domain, clientID)
+			if !bytes.Equal(gotData, data) {
+				t.Fatalf("domain=%s clientID=%d: data mismatch", domain, clientID)
 			}
 		}
 	}
@@ -80,19 +75,16 @@ func TestQueryRoundTrip(t *testing.T) {
 
 func TestQueryLength(t *testing.T) {
 	qc := &QueryConfig{Domain: "a.b.com"}
-	pkt := &Packet{
-		Cmd:     CmdPoll,
-		Counter: 1,
-	}
+	data := []byte("small test payload")
 
-	query, err := qc.EncodeQuery(pkt, 0)
+	query, err := qc.EncodeQuery(data, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	t.Logf("Query: %s (len=%d)", query, len(query))
 	if len(query) != maxDomainLen {
-		t.Logf("Warning: query length %d != %d (padding should fill to max)", len(query), maxDomainLen)
+		t.Logf("Note: query length %d != %d (padding fills to max)", len(query), maxDomainLen)
 	}
 }
 
@@ -164,9 +156,10 @@ func TestFrameTruncationDetected(t *testing.T) {
 
 func TestMaxPayload(t *testing.T) {
 	domains := []string{"a.b.com", "tunnel.example.com", "very.long.subdomain.example.org"}
+	cipherOverhead := 28 // AES-GCM: 12 nonce + 16 tag
 	for _, domain := range domains {
 		qc := &QueryConfig{Domain: domain}
-		maxPL := qc.MaxPayload(0)
+		maxPL := qc.MaxPayload(0, cipherOverhead)
 		t.Logf("domain=%s maxPayload=%d", domain, maxPL)
 		if maxPL <= 0 {
 			t.Fatalf("domain=%s: max payload should be positive", domain)

@@ -11,11 +11,43 @@ Harry is designed for scenarios where DNS is the only available network protocol
 
 ### Protocol
 
-Data is encoded into DNS query labels using base36 (DNS-safe, case-insensitive). Each query uses 4 labels with a total domain length of 253 characters. The client ID (0-63) is encoded in the lengths of the first 3 labels (60-63 chars each, 2 bits per label).
-
-All tunnel payloads are encrypted with AES-256-GCM using a key derived from a shared password (PBKDF2).
+All tunnel traffic (both directions) is fully encrypted with AES-256-GCM. The key is derived from a shared password via PBKDF2. Data is gzip compressed before encryption when compression reduces size.
 
 On connect, the client auto-tunes the maximum TXT response size (255 → 512 → 1000 bytes).
+
+### Wire Format
+
+**DNS Query (client → server):**
+```
+<block4>.<block3>.<block2>.<block1>.<domain>
+
+Each block is base36-encoded. Client ID (0-63) encoded in block 1-3 lengths.
+Total query: 253 chars max.
+
+Decoded payload (after base36 decode):
+  encrypt( gzip( [cmd 1B] [counter 3B] [payload...] ) )
+
+cmd:     command code (c=connect, p=poll, d=data, f=file, etc.)
+counter: 24-bit request counter (cache-busting, dedup)
+payload: command-specific data (plaintext before encrypt)
+```
+
+**DNS TXT Response (server → client):**
+```
+base36( [CRC32 4B] [transfer_id 2B] [chunk_idx 2B] [chunk_total 2B] [flags 1B] [encrypted_payload] )
+
+CRC32:        IEEE CRC32 over everything after it (integrity check)
+transfer_id:  identifies the logical transfer (file, list, etc.)
+chunk_idx:    which chunk of the transfer (0-based)
+chunk_total:  total chunks in the transfer
+flags:        bit 0 = more data queued, bit 1 = error
+payload:      encrypt( gzip( response_data ) )
+```
+
+**SOCKS5 Stream Data (multiplexed in payload):**
+```
+[stream_id 2B] [length 2B] [data...] [stream_id 2B] [length 2B] [data...] ...
+```
 
 ## Building
 
@@ -60,6 +92,7 @@ The server must be configured as the authoritative nameserver for the specified 
 | `-files` | `./files` | Directory for downloadable files |
 | `-uploads` | `./uploads` | Directory for uploaded files |
 | `-cache` | (temp dir) | Bootstrap cache directory |
+| `-rshell` | | TCP listen address for reverse shell (e.g., `127.0.0.1:4444`) |
 | `-ttl` | `1` | DNS record TTL |
 | `-verbose` | `false` | Log all queries and packet details |
 
@@ -111,6 +144,14 @@ harry fetch http://example.com
 # Fetch without following redirects
 harry -no-redirect fetch http://google.com
 
+# SOCKS5 proxy (tunnel TCP traffic through DNS)
+harry socks5
+harry -socks-addr 0.0.0.0:8080 socks5
+curl --socks5-hostname 127.0.0.1:1080 http://example.com
+
+# Reverse shell (expose local shell to server)
+harry rshell
+
 # Bidirectional pipe (stdin/stdout)
 harry pipe
 
@@ -126,6 +167,7 @@ harry poll
 | `-poll` | `30s` | Idle poll interval |
 | `-f` | `false` | Force overwrite existing file |
 | `-no-redirect` | `false` | Don't follow HTTP redirects |
+| `-socks-addr` | `127.0.0.1:1080` | SOCKS5 listen address |
 | `-rc` | `~/.harryrc` | RC file path |
 
 ## Bootstrap
@@ -178,9 +220,11 @@ Responses use a wire frame format with CRC32 integrity checks, transfer IDs, and
 ## Security Considerations
 
 **Encrypted (AES-256-GCM, unique random nonce per message):**
-- All tunnel payloads in both directions — file data, filenames, commands, responses
+- All tunnel traffic in both directions is fully encrypted — command codes, counters, filenames, file data, responses
+- Data is gzip compressed before encryption when compression reduces size
 - Key derived from shared password via PBKDF2 (100,000 iterations, SHA-256)
 - Each encrypted message is unique due to random nonce, making DNS response caching harmless
+- An observer sees only the domain name and base36-encoded blobs — no metadata leaks
 
 **Not encrypted (plaintext):**
 - Bootstrap script and client binary chunks (served as base64/gzip over DNS)

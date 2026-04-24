@@ -1,8 +1,11 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha1"
 	"fmt"
+	"io"
 	"log"
 	"strings"
 	"time"
@@ -13,6 +16,33 @@ import (
 
 	"github.com/miekg/dns"
 )
+
+func gzipCompress(data []byte) []byte {
+	var buf bytes.Buffer
+	w, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	w.Write(data)
+	w.Close()
+	if buf.Len() < len(data) {
+		return buf.Bytes()
+	}
+	return data
+}
+
+func gzipDecompress(data []byte) []byte {
+	if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
+		return data
+	}
+	r, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return data
+	}
+	defer r.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		return data
+	}
+	return out
+}
 
 // Handler processes DNS tunnel requests.
 type Handler struct {
@@ -141,8 +171,8 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	// Decode the tunnel query
-	pkt, clientID, err := h.qc.DecodeQuery(qname)
+	// Decode the tunnel query (returns encrypted bytes)
+	encData, clientID, err := h.qc.DecodeQuery(qname)
 	if err != nil {
 		if h.config.Verbose {
 			log.Printf("[%s] stray query: %s", src, qname)
@@ -152,16 +182,29 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	// Decrypt payload if present
-	if len(pkt.Payload) > 0 {
-		decrypted, err := h.cipher.Decrypt(pkt.Payload)
-		if err != nil {
-			log.Printf("decrypt error from client %d: %v", clientID, err)
-			msg.Rcode = dns.RcodeRefused
-			w.WriteMsg(msg)
-			return
+	// Decrypt entire packet
+	decrypted, err := h.cipher.Decrypt(encData)
+	if err != nil {
+		if h.config.Verbose {
+			log.Printf("[%s] decrypt error from client %d: %v", src, clientID, err)
 		}
-		pkt.Payload = decrypted
+		msg.Rcode = dns.RcodeRefused
+		w.WriteMsg(msg)
+		return
+	}
+
+	// Decompress
+	decompressed := gzipDecompress(decrypted)
+
+	// Unmarshal packet
+	pkt, err := protocol.UnmarshalPacket(decompressed)
+	if err != nil {
+		if h.config.Verbose {
+			log.Printf("[%s] unmarshal error: %v", src, err)
+		}
+		msg.Rcode = dns.RcodeServerFailure
+		w.WriteMsg(msg)
+		return
 	}
 
 	if h.config.Verbose {
@@ -172,9 +215,10 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	// Process command — returns a frame ready for encoding
 	frame := h.processCommand(pkt, clientID, src)
 
-	// Encrypt frame payload
+	// Compress and encrypt frame payload
 	if len(frame.Payload) > 0 {
-		encrypted, err := h.cipher.Encrypt(frame.Payload)
+		compressed := gzipCompress(frame.Payload)
+		encrypted, err := h.cipher.Encrypt(compressed)
 		if err != nil {
 			log.Printf("encrypt error: %v", err)
 			msg.Rcode = dns.RcodeServerFailure

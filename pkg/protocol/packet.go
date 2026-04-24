@@ -14,7 +14,6 @@
 package protocol
 
 import (
-	"encoding/binary"
 	"fmt"
 	"hash/crc32"
 	"strings"
@@ -92,18 +91,19 @@ type QueryConfig struct {
 	Domain string // base domain (e.g., "a.b.com")
 }
 
-// MaxPayload returns the maximum payload bytes that can fit in a query
-// for a given domain, after accounting for cmd, counter, and encoding overhead.
-func (qc *QueryConfig) MaxPayload(clientID byte) int {
-	// Calculate total available chars for encoded data
+// MaxPayload returns the maximum plaintext payload bytes that can fit in a query
+// for a given domain, after accounting for cmd, counter, encryption, and encoding.
+// cipherOverhead is the number of bytes added by encryption (nonce + tag).
+func (qc *QueryConfig) MaxPayload(clientID byte, cipherOverhead int) int {
 	totalEncoded := qc.totalEncodedChars(clientID)
-	// Estimate: base36 encoding ratio is ~log(256)/log(36) ≈ 1.546
-	// So N encoded chars ≈ N / 1.546 bytes. Subtract 4 for cmd+counter.
-	approxBytes := int(float64(totalEncoded) / 1.546)
-	if approxBytes < 4 {
+	rawBytes := encoding.MaxDecodedSize(totalEncoded)
+	// Raw layout after encryption: encrypted(cmd 1B + counter 3B + payload)
+	// encrypted adds cipherOverhead bytes
+	available := rawBytes - cipherOverhead - 4 // 4 = cmd + counter
+	if available < 0 {
 		return 0
 	}
-	return approxBytes - 4
+	return available
 }
 
 // totalEncodedChars returns the total base36 chars available across all blocks.
@@ -117,9 +117,9 @@ func (qc *QueryConfig) totalEncodedChars(clientID byte) int {
 	return b1 + b2 + b3 + b4
 }
 
-// EncodeQuery encodes a packet into a DNS query name.
-func (qc *QueryConfig) EncodeQuery(pkt *Packet, clientID byte) (string, error) {
-	data := pkt.Marshal()
+// EncodeQuery encodes raw bytes (typically encrypted) into a DNS query name.
+// The clientID is encoded in the DNS label lengths.
+func (qc *QueryConfig) EncodeQuery(data []byte, clientID byte) (string, error) {
 	encoded := encoding.Encode(data)
 
 	b1, b2, b3 := clientIDToBlockLens(clientID)
@@ -157,33 +157,27 @@ func (qc *QueryConfig) EncodeQuery(pkt *Packet, clientID byte) (string, error) {
 	return strings.Join(parts, "."), nil
 }
 
-// DecodeQuery decodes a DNS query name back into a packet and client ID.
-func (qc *QueryConfig) DecodeQuery(query string) (*Packet, byte, error) {
-	// Normalize to lowercase
+// DecodeQuery decodes a DNS query name back into raw bytes and client ID.
+// The returned bytes are typically encrypted and need decryption before unmarshaling.
+func (qc *QueryConfig) DecodeQuery(query string) ([]byte, byte, error) {
 	query = strings.ToLower(query)
 
-	// Strip the domain suffix
 	suffix := "." + strings.ToLower(qc.Domain)
 	if !strings.HasSuffix(query, suffix) {
 		return nil, 0, fmt.Errorf("query %q does not end with domain %q", query, qc.Domain)
 	}
 	dataStr := query[:len(query)-len(suffix)]
 
-	// Split into labels
 	labels := strings.Split(dataStr, ".")
 	if len(labels) != numBlocks {
 		return nil, 0, fmt.Errorf("expected %d data labels, got %d", numBlocks, len(labels))
 	}
 
-	// Labels are: block4, block3, block2, block1 (left to right)
-	// Client ID from block1, block2, block3 lengths (rightmost 3 labels)
-	b1Len := len(labels[3]) // block1 is rightmost = last label
+	b1Len := len(labels[3])
 	b2Len := len(labels[2])
 	b3Len := len(labels[1])
-
 	clientID := blockLensToClientID(b1Len, b2Len, b3Len)
 
-	// Concatenate all labels: block4 + block3 + block2 + block1
 	var encoded strings.Builder
 	for _, l := range labels {
 		encoded.WriteString(l)
@@ -194,12 +188,7 @@ func (qc *QueryConfig) DecodeQuery(query string) (*Packet, byte, error) {
 		return nil, 0, fmt.Errorf("base36 decode: %w", err)
 	}
 
-	pkt, err := UnmarshalPacket(data)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return pkt, clientID, nil
+	return data, clientID, nil
 }
 
 // Response represents a server response (application layer).
@@ -308,5 +297,3 @@ func padLeft(s string, totalLen int, pad byte) string {
 	return string(padding) + s
 }
 
-// Ensure binary package is used (for future use)
-var _ = binary.BigEndian

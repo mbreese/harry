@@ -3,6 +3,7 @@ package client
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/sha1"
 	"fmt"
 	"io"
@@ -105,19 +106,13 @@ func (c *Client) Poll() (*protocol.Frame, error) {
 
 // pollAck sends a poll with ACK for a transfer chunk, requesting the next chunk.
 func (c *Client) pollAck(transferID, lastAck uint16) (*protocol.Frame, error) {
-	ackPayload := []byte{
-		byte(transferID >> 8), byte(transferID),
-		byte(lastAck >> 8), byte(lastAck),
-	}
-	encrypted, err := c.cipher.Encrypt(ackPayload)
-	if err != nil {
-		return nil, fmt.Errorf("encrypt ack: %w", err)
-	}
-
 	pkt := &protocol.Packet{
 		Cmd:     protocol.CmdPoll,
 		Counter: c.nextCounter(),
-		Payload: encrypted,
+		Payload: []byte{
+			byte(transferID >> 8), byte(transferID),
+			byte(lastAck >> 8), byte(lastAck),
+		},
 	}
 	return c.sendPacket(pkt, c.clientID)
 }
@@ -305,23 +300,20 @@ func (c *Client) StartRShell(pollInterval time.Duration) error {
 	}
 }
 
-// MaxUpstreamChunk returns the max bytes that can be sent in a single upstream DNS query.
+// MaxUpstreamChunk returns the max payload bytes in a single upstream DNS query.
+// The entire packet (cmd+counter+payload) is encrypted, so we subtract the
+// packet header (4 bytes) from MaxPayload.
 func (c *Client) MaxUpstreamChunk() int {
-	return c.qc.MaxPayload(c.clientID) - c.cipher.Overhead()
+	return c.qc.MaxPayload(c.clientID, c.cipher.Overhead())
 }
 
 // SendData sends upstream data in a single DNS query.
 // Data must fit within MaxUpstreamChunk().
 func (c *Client) SendData(data []byte) (*protocol.Frame, error) {
-	encrypted, err := c.cipher.Encrypt(data)
-	if err != nil {
-		return nil, fmt.Errorf("encrypt: %w", err)
-	}
-
 	pkt := &protocol.Packet{
 		Cmd:     protocol.CmdData,
 		Counter: c.nextCounter(),
-		Payload: encrypted,
+		Payload: data,
 	}
 	return c.sendPacket(pkt, c.clientID)
 }
@@ -376,16 +368,10 @@ const (
 
 // FetchURL requests the server to fetch a URL and returns the response.
 func (c *Client) FetchURL(url string, flags byte) ([]byte, error) {
-	payload := append([]byte{flags}, []byte(url)...)
-	encrypted, err := c.cipher.Encrypt(payload)
-	if err != nil {
-		return nil, fmt.Errorf("encrypt url: %w", err)
-	}
-
 	pkt := &protocol.Packet{
 		Cmd:     protocol.CmdFetch,
 		Counter: c.nextCounter(),
-		Payload: encrypted,
+		Payload: append([]byte{flags}, []byte(url)...),
 	}
 
 	frame, err := c.sendPacket(pkt, c.clientID)
@@ -422,15 +408,10 @@ func (c *Client) ListFiles() ([]string, error) {
 
 // RequestFile requests a file from the server and returns its contents.
 func (c *Client) RequestFile(name string) ([]byte, error) {
-	encrypted, err := c.cipher.Encrypt([]byte(name))
-	if err != nil {
-		return nil, fmt.Errorf("encrypt filename: %w", err)
-	}
-
 	pkt := &protocol.Packet{
 		Cmd:     protocol.CmdFile,
 		Counter: c.nextCounter(),
-		Payload: encrypted,
+		Payload: []byte(name),
 	}
 
 	frame, err := c.sendPacket(pkt, c.clientID)
@@ -486,16 +467,10 @@ func (c *Client) SendStream(r io.Reader, remoteName string, flags byte) error {
 
 func (c *Client) sendData(data []byte, remoteName string, flags byte, showPct bool) error {
 	// Start upload: payload = [flags 1B][filename...]
-	uploadPayload := append([]byte{flags}, []byte(remoteName)...)
-	encPayload, err := c.cipher.Encrypt(uploadPayload)
-	if err != nil {
-		return fmt.Errorf("encrypt upload header: %w", err)
-	}
-
 	pkt := &protocol.Packet{
 		Cmd:     protocol.CmdUpload,
 		Counter: c.nextCounter(),
-		Payload: encPayload,
+		Payload: append([]byte{flags}, []byte(remoteName)...),
 	}
 
 	frame, err := c.sendPacket(pkt, c.clientID)
@@ -510,7 +485,7 @@ func (c *Client) sendData(data []byte, remoteName string, flags byte, showPct bo
 	}
 
 	// Send data in chunks
-	maxPayload := c.qc.MaxPayload(c.clientID) - c.cipher.Overhead()
+	maxPayload := c.MaxUpstreamChunk()
 	if maxPayload <= 0 {
 		return fmt.Errorf("no space for data")
 	}
@@ -525,15 +500,10 @@ func (c *Client) sendData(data []byte, remoteName string, flags byte, showPct bo
 		chunk := data[sent:end]
 		hasher.Write(chunk)
 
-		encrypted, err := c.cipher.Encrypt(chunk)
-		if err != nil {
-			return fmt.Errorf("encrypt chunk: %w", err)
-		}
-
 		pkt := &protocol.Packet{
 			Cmd:     protocol.CmdData,
 			Counter: c.nextCounter(),
-			Payload: encrypted,
+			Payload: chunk,
 		}
 
 		frame, err := c.sendPacket(pkt, c.clientID)
@@ -565,15 +535,10 @@ func (c *Client) sendData(data []byte, remoteName string, flags byte, showPct bo
 	donePayload[3] = byte(size)
 	copy(donePayload[4:], hashBytes[:])
 
-	encDone, err := c.cipher.Encrypt(donePayload)
-	if err != nil {
-		return fmt.Errorf("encrypt done: %w", err)
-	}
-
 	pkt = &protocol.Packet{
 		Cmd:     protocol.CmdUploadDone,
 		Counter: c.nextCounter(),
-		Payload: encDone,
+		Payload: donePayload,
 	}
 	frame, err = c.sendPacket(pkt, c.clientID)
 	if err != nil {
@@ -595,16 +560,10 @@ func (c *Client) autoTune() error {
 	sizes := []int{255, 512, 1000}
 
 	for _, size := range sizes {
-		payload := []byte{byte(size >> 8), byte(size)}
-		encrypted, err := c.cipher.Encrypt(payload)
-		if err != nil {
-			return err
-		}
-
 		pkt := &protocol.Packet{
 			Cmd:     protocol.CmdTune,
 			Counter: c.nextCounter(),
-			Payload: encrypted,
+			Payload: []byte{byte(size >> 8), byte(size)},
 		}
 
 		frame, err := c.sendPacket(pkt, c.clientID)
@@ -624,9 +583,17 @@ func (c *Client) autoTune() error {
 	return nil
 }
 
-// sendPacket encodes a packet as a DNS query, sends it, and returns the decoded frame.
+// sendPacket encrypts a packet, encodes as DNS query, sends it, and returns the decoded frame.
 func (c *Client) sendPacket(pkt *protocol.Packet, clientID byte) (*protocol.Frame, error) {
-	query, err := c.qc.EncodeQuery(pkt, clientID)
+	// Marshal → compress → encrypt → base36 → DNS labels
+	marshaled := pkt.Marshal()
+	compressed := gzipCompress(marshaled)
+	encrypted, err := c.cipher.Encrypt(compressed)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt packet: %w", err)
+	}
+
+	query, err := c.qc.EncodeQuery(encrypted, clientID)
 	if err != nil {
 		return nil, fmt.Errorf("encode query: %w", err)
 	}
@@ -670,13 +637,13 @@ func (c *Client) sendPacket(pkt *protocol.Packet, clientID byte) (*protocol.Fram
 		return nil, fmt.Errorf("response frame: %w", err)
 	}
 
-	// Decrypt payload if present
+	// Decrypt and decompress payload if present
 	if len(frame.Payload) > 0 {
 		decrypted, err := c.cipher.Decrypt(frame.Payload)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt response: %w", err)
 		}
-		frame.Payload = decrypted
+		frame.Payload = gzipDecompress(decrypted)
 	}
 
 	return frame, nil
@@ -697,6 +664,34 @@ func showProgressBytes(sent, total int, pct float64) {
 	filled := int(pct * float64(barWidth))
 	bar := strings.Repeat("=", filled) + strings.Repeat(" ", barWidth-filled)
 	fmt.Fprintf(os.Stderr, "\r[%s] %d/%d bytes (%.0f%%)", bar, sent, total, pct*100)
+}
+
+func gzipCompress(data []byte) []byte {
+	var buf bytes.Buffer
+	w, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	w.Write(data)
+	w.Close()
+	// Only use compressed if it's actually smaller
+	if buf.Len() < len(data) {
+		return buf.Bytes()
+	}
+	return data
+}
+
+func gzipDecompress(data []byte) []byte {
+	if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
+		return data // not gzip
+	}
+	r, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return data
+	}
+	defer r.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		return data
+	}
+	return out
 }
 
 // systemResolver reads the first nameserver from /etc/resolv.conf.
