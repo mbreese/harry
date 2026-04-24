@@ -193,7 +193,13 @@ func (c *Client) StartRShell(pollInterval time.Duration) error {
 	log.Printf("rshell: server %s", frame.Payload)
 
 	// Spawn local shell
-	shell := exec.Command("/bin/sh", "-i")
+	// Use the user's shell from $SHELL, fall back to /bin/sh
+	shellPath := os.Getenv("SHELL")
+	if shellPath == "" {
+		shellPath = "/bin/sh"
+	}
+	// -l for login shell (loads RC files and env), -i for interactive
+	shell := exec.Command(shellPath, "-l", "-i")
 	shellIn, err := shell.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("shell stdin: %w", err)
