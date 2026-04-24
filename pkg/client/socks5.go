@@ -114,7 +114,7 @@ func (c *Client) StartSocks5(listenAddr string, pollInterval time.Duration) erro
 		for _, stream := range streams {
 			stream.mu.Lock()
 			if len(stream.buf) > 0 {
-				maxChunk := c.qc.MaxPayload(c.clientID) - c.cipher.Overhead() - 2
+				maxChunk := c.MaxUpstreamChunk() - 2 // -2 for stream ID prefix
 				if maxChunk <= 0 {
 					stream.mu.Unlock()
 					continue

