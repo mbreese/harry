@@ -97,59 +97,66 @@ func TestQueryLength(t *testing.T) {
 }
 
 func TestFrameRoundTrip(t *testing.T) {
-	payload := []byte("encrypted data here")
-	seq := uint16(42)
-	flags := FlagMoreData
+	f := &Frame{
+		TransferID: 5,
+		ChunkIdx:   2,
+		ChunkTotal: 10,
+		Flags:      FlagMoreData,
+		Payload:    []byte("encrypted data here"),
+	}
 
-	frame := MarshalFrame(seq, flags, payload)
-	gotSeq, gotFlags, gotPayload, err := UnmarshalFrame(frame)
+	data := MarshalFrame(f)
+	got, err := UnmarshalFrame(data)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if gotSeq != seq {
-		t.Fatalf("seq mismatch: %d != %d", gotSeq, seq)
+	if got.TransferID != f.TransferID {
+		t.Fatalf("transfer ID mismatch: %d != %d", got.TransferID, f.TransferID)
 	}
-	if gotFlags != flags {
-		t.Fatalf("flags mismatch: %d != %d", gotFlags, flags)
+	if got.ChunkIdx != f.ChunkIdx {
+		t.Fatalf("chunk idx mismatch: %d != %d", got.ChunkIdx, f.ChunkIdx)
 	}
-	if !bytes.Equal(gotPayload, payload) {
+	if got.ChunkTotal != f.ChunkTotal {
+		t.Fatalf("chunk total mismatch: %d != %d", got.ChunkTotal, f.ChunkTotal)
+	}
+	if got.Flags != f.Flags {
+		t.Fatalf("flags mismatch: %d != %d", got.Flags, f.Flags)
+	}
+	if !bytes.Equal(got.Payload, f.Payload) {
 		t.Fatalf("payload mismatch")
 	}
 }
 
 func TestFrameEmptyPayload(t *testing.T) {
-	frame := MarshalFrame(0, 0, nil)
-	seq, flags, payload, err := UnmarshalFrame(frame)
+	data := MarshalFrame(&Frame{})
+	got, err := UnmarshalFrame(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if seq != 0 || flags != 0 || len(payload) != 0 {
-		t.Fatalf("empty frame mismatch: seq=%d flags=%d payload=%x", seq, flags, payload)
+	if got.TransferID != 0 || got.ChunkIdx != 0 || got.ChunkTotal != 0 || got.Flags != 0 || len(got.Payload) != 0 {
+		t.Fatalf("empty frame mismatch: %+v", got)
 	}
 }
 
 func TestFrameCorruptionDetected(t *testing.T) {
-	frame := MarshalFrame(1, FlagMoreData, []byte("test data"))
+	data := MarshalFrame(&Frame{Flags: FlagMoreData, Payload: []byte("test data")})
 
-	// Flip a bit in the payload
-	corrupted := make([]byte, len(frame))
-	copy(corrupted, frame)
+	corrupted := make([]byte, len(data))
+	copy(corrupted, data)
 	corrupted[len(corrupted)-1] ^= 0x01
 
-	_, _, _, err := UnmarshalFrame(corrupted)
+	_, err := UnmarshalFrame(corrupted)
 	if err == nil {
 		t.Fatal("expected CRC error on corrupted frame")
 	}
 }
 
 func TestFrameTruncationDetected(t *testing.T) {
-	frame := MarshalFrame(1, 0, []byte("test data"))
+	data := MarshalFrame(&Frame{Payload: []byte("test data")})
+	truncated := data[:len(data)-3]
 
-	// Truncate the frame
-	truncated := frame[:len(frame)-3]
-
-	_, _, _, err := UnmarshalFrame(truncated)
+	_, err := UnmarshalFrame(truncated)
 	if err == nil {
 		t.Fatal("expected CRC error on truncated frame")
 	}

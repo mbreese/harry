@@ -147,11 +147,11 @@ func main() {
 
 	case "poll":
 		for {
-			resp, err := c.Poll()
+			frame, err := c.Poll()
 			if err != nil {
 				log.Printf("poll error: %v", err)
-			} else if len(resp.Payload) > 0 {
-				fmt.Printf("%s", resp.Payload)
+			} else if len(frame.Payload) > 0 {
+				fmt.Printf("%s", frame.Payload)
 			}
 			time.Sleep(*pollInterval)
 		}
@@ -241,38 +241,38 @@ func runPipe(c *client.Client, pollInterval time.Duration) {
 			if !ok {
 				return
 			}
-			resp, err := c.SendData(data)
+			frame, err := c.SendData(data)
 			if err != nil {
 				log.Printf("send error: %v", err)
 				continue
 			}
-			if len(resp.Payload) > 0 {
-				os.Stdout.Write(resp.Payload)
+			if len(frame.Payload) > 0 {
+				os.Stdout.Write(frame.Payload)
 			}
-			moreData = resp.Flags&protocol.FlagMoreData != 0
+			moreData = frame.Flags&protocol.FlagMoreData != 0
 
 		default:
 			if moreData {
-				resp, err := c.Poll()
+				frame, err := c.Poll()
 				if err != nil {
 					log.Printf("poll error: %v", err)
 					continue
 				}
-				if len(resp.Payload) > 0 {
-					os.Stdout.Write(resp.Payload)
+				if len(frame.Payload) > 0 {
+					os.Stdout.Write(frame.Payload)
 				}
-				moreData = resp.Flags&protocol.FlagMoreData != 0
+				moreData = frame.Flags&protocol.FlagMoreData != 0
 			} else {
 				time.Sleep(pollInterval)
-				resp, err := c.Poll()
+				frame, err := c.Poll()
 				if err != nil {
 					log.Printf("poll error: %v", err)
 					continue
 				}
-				if len(resp.Payload) > 0 {
-					os.Stdout.Write(resp.Payload)
+				if len(frame.Payload) > 0 {
+					os.Stdout.Write(frame.Payload)
 				}
-				moreData = resp.Flags&protocol.FlagMoreData != 0
+				moreData = frame.Flags&protocol.FlagMoreData != 0
 			}
 		}
 	}

@@ -163,32 +163,23 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		pkt.Payload = decrypted
 	}
 
-	// Process command
-	resp, _ := h.processCommand(pkt, clientID, src)
+	// Process command — returns a frame ready for encoding
+	frame := h.processCommand(pkt, clientID, src)
 
-	// Use the client's request counter as the response sequence number.
-	// This ensures DNS resolver retries (which resend the same counter)
-	// produce responses with the same seq, preventing sequence drift.
-	seq := uint16(pkt.Counter & 0xFFFF)
-
-	// Encrypt response payload
-	var encPayload []byte
-	if len(resp.Payload) > 0 {
-		encrypted, err := h.cipher.Encrypt(resp.Payload)
+	// Encrypt frame payload
+	if len(frame.Payload) > 0 {
+		encrypted, err := h.cipher.Encrypt(frame.Payload)
 		if err != nil {
 			log.Printf("encrypt error: %v", err)
 			msg.Rcode = dns.RcodeServerFailure
 			w.WriteMsg(msg)
 			return
 		}
-		encPayload = encrypted
+		frame.Payload = encrypted
 	}
 
-	// Build frame with CRC and sequence number
-	frameData := protocol.MarshalFrame(seq, resp.Flags, encPayload)
-
-	// Encode as TXT record
-	txt := encoding.Encode(frameData)
+	// Build wire frame with CRC and encode as TXT record
+	txt := encoding.Encode(protocol.MarshalFrame(frame))
 
 	rr := &dns.TXT{
 		Hdr: dns.RR_Header{
@@ -203,71 +194,89 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	w.WriteMsg(msg)
 }
 
-// processCommand handles a decoded packet and returns a response and the session.
-func (h *Handler) processCommand(pkt *protocol.Packet, clientID byte, src string) (*protocol.Response, *Session) {
+// errorFrame returns a frame with the error flag set.
+func errorFrame() *protocol.Frame {
+	return &protocol.Frame{Flags: protocol.FlagError}
+}
+
+// processCommand handles a decoded packet and returns a frame for the response.
+func (h *Handler) processCommand(pkt *protocol.Packet, clientID byte, src string) *protocol.Frame {
 	switch pkt.Cmd {
 	case protocol.CmdConnect:
-		resp, session := h.handleConnect(src)
-		return resp, session
+		return h.handleConnect(src)
 	case protocol.CmdPoll:
-		return h.handlePoll(clientID), h.sessions.Get(clientID)
+		return h.handlePoll(pkt, clientID)
 	case protocol.CmdData:
-		return h.handleData(pkt, clientID), h.sessions.Get(clientID)
+		return h.handleData(pkt, clientID)
 	case protocol.CmdFile:
-		return h.handleFile(pkt, clientID), h.sessions.Get(clientID)
+		return h.handleFile(pkt, clientID)
 	case protocol.CmdTune:
-		return h.handleTune(pkt, clientID), h.sessions.Get(clientID)
+		return h.handleTune(pkt, clientID)
 	case protocol.CmdUpload:
-		return h.handleUploadStart(pkt, clientID), h.sessions.Get(clientID)
+		return h.handleUploadStart(pkt, clientID)
 	case protocol.CmdUploadDone:
-		return h.handleUploadDone(pkt, clientID), h.sessions.Get(clientID)
+		return h.handleUploadDone(pkt, clientID)
 	case protocol.CmdList:
-		return h.handleList(clientID), h.sessions.Get(clientID)
+		return h.handleList(clientID)
 	case protocol.CmdFetch:
-		return h.handleFetch(pkt, clientID), h.sessions.Get(clientID)
+		return h.handleFetch(pkt, clientID)
 	default:
 		log.Printf("unknown command: %c", pkt.Cmd)
-		return &protocol.Response{Flags: protocol.FlagError}, nil
+		return errorFrame()
 	}
 }
 
-func (h *Handler) handleConnect(src string) (*protocol.Response, *Session) {
+func (h *Handler) handleConnect(src string) *protocol.Frame {
 	session, err := h.sessions.NewSession()
 	if err != nil {
 		log.Printf("[%s] connect error: %v", src, err)
-		return &protocol.Response{Flags: protocol.FlagError}, nil
+		return errorFrame()
 	}
 	log.Printf("[%s] new client connected: ID=%d", src, session.ID)
-	return &protocol.Response{
+	return &protocol.Frame{
 		Payload: []byte{session.ID},
-	}, session
+	}
 }
 
-func (h *Handler) handlePoll(clientID byte) *protocol.Response {
+// handlePoll returns the next chunk of an active transfer.
+// The client's payload contains: [transfer_id 2B] [last_ack 2B]
+// If transfer_id is 0, the client is just polling (no active download).
+func (h *Handler) handlePoll(pkt *protocol.Packet, clientID byte) *protocol.Frame {
 	session := h.sessions.Get(clientID)
 	if session == nil {
-		return &protocol.Response{Flags: protocol.FlagError}
+		return errorFrame()
 	}
 	session.LastSeen = now()
 
-	// Dequeue data for client
-	maxPayload := h.responsePayloadSize(session)
-	data, more := session.Dequeue(maxPayload)
+	// Parse ACK from client payload
+	if len(pkt.Payload) < 4 {
+		// No ACK data — just a bare poll
+		return &protocol.Frame{}
+	}
 
-	flags := byte(0)
-	if more {
-		flags |= protocol.FlagMoreData
+	transferID := uint16(pkt.Payload[0])<<8 | uint16(pkt.Payload[1])
+	lastAck := uint16(pkt.Payload[2])<<8 | uint16(pkt.Payload[3])
+
+	t := session.Transfers.Get(transferID)
+	if t == nil {
+		return errorFrame()
 	}
-	return &protocol.Response{
-		Flags:   flags,
-		Payload: data,
+
+	// Next chunk is lastAck + 1
+	nextIdx := lastAck + 1
+	if nextIdx >= t.TotalChunks {
+		// Transfer complete — clean up
+		session.Transfers.Remove(transferID)
+		return &protocol.Frame{}
 	}
+
+	return h.chunkFrame(t, nextIdx)
 }
 
-func (h *Handler) handleData(pkt *protocol.Packet, clientID byte) *protocol.Response {
+func (h *Handler) handleData(pkt *protocol.Packet, clientID byte) *protocol.Frame {
 	session := h.sessions.Get(clientID)
 	if session == nil {
-		return &protocol.Response{Flags: protocol.FlagError}
+		return errorFrame()
 	}
 	session.LastSeen = now()
 
@@ -275,30 +284,36 @@ func (h *Handler) handleData(pkt *protocol.Packet, clientID byte) *protocol.Resp
 	if session.UploadFile != "" && len(pkt.Payload) > 0 {
 		if err := h.appendUpload(session, pkt.Payload); err != nil {
 			log.Printf("client %d: upload write error: %v", clientID, err)
-			return &protocol.Response{Flags: protocol.FlagError}
+			return errorFrame()
 		}
 	} else if len(pkt.Payload) > 0 {
 		log.Printf("client %d: received %d bytes upstream (no active upload)", clientID, len(pkt.Payload))
 	}
 
-	// Return any queued downstream data
-	maxPayload := h.responsePayloadSize(session)
-	data, more := session.Dequeue(maxPayload)
+	// ACK the upload chunk
+	return &protocol.Frame{}
+}
 
+// chunkFrame builds a frame for a specific chunk of a transfer.
+func (h *Handler) chunkFrame(t *Transfer, idx uint16) *protocol.Frame {
+	chunk := t.GetChunk(idx)
 	flags := byte(0)
-	if more {
+	if idx < t.TotalChunks-1 {
 		flags |= protocol.FlagMoreData
 	}
-	return &protocol.Response{
-		Flags:   flags,
-		Payload: data,
+	return &protocol.Frame{
+		TransferID: t.ID,
+		ChunkIdx:   idx,
+		ChunkTotal: t.TotalChunks,
+		Flags:      flags,
+		Payload:    chunk,
 	}
 }
 
-func (h *Handler) handleFile(pkt *protocol.Packet, clientID byte) *protocol.Response {
+func (h *Handler) handleFile(pkt *protocol.Packet, clientID byte) *protocol.Frame {
 	session := h.sessions.Get(clientID)
 	if session == nil {
-		return &protocol.Response{Flags: protocol.FlagError}
+		return errorFrame()
 	}
 	session.LastSeen = now()
 
@@ -306,67 +321,46 @@ func (h *Handler) handleFile(pkt *protocol.Packet, clientID byte) *protocol.Resp
 	data, err := h.files.Get(filename)
 	if err != nil {
 		log.Printf("client %d: file request error: %v", clientID, err)
-		return &protocol.Response{Flags: protocol.FlagError}
+		return errorFrame()
 	}
 
 	// Prepend SHA1 hash (20 bytes) so client can verify integrity
 	hash := sha1.Sum(data)
 	payload := append(hash[:], data...)
 
-	// Queue the file data for streaming to the client
-	session.QueueData(payload)
-	log.Printf("client %d: queued file %q (%d bytes, sha1=%x)", clientID, filename, len(data), hash)
+	// Create a transfer with indexed chunks
+	maxPayload := h.responsePayloadSize(session)
+	t := session.Transfers.NewTransfer(payload, maxPayload)
+	log.Printf("client %d: file %q → transfer %d (%d bytes, %d chunks, sha1=%x)",
+		clientID, filename, t.ID, len(data), t.TotalChunks, hash)
 
 	// Return first chunk
-	maxPayload := h.responsePayloadSize(session)
-	chunk, more := session.Dequeue(maxPayload)
-
-	flags := byte(0)
-	if more {
-		flags |= protocol.FlagMoreData
-	}
-	return &protocol.Response{
-		Flags:   flags,
-		Payload: chunk,
-	}
+	return h.chunkFrame(t, 0)
 }
 
-func (h *Handler) handleList(clientID byte) *protocol.Response {
+func (h *Handler) handleList(clientID byte) *protocol.Frame {
 	session := h.sessions.Get(clientID)
 	if session == nil {
-		return &protocol.Response{Flags: protocol.FlagError}
+		return errorFrame()
 	}
 	session.LastSeen = now()
 
 	names, err := h.files.List()
 	if err != nil {
 		log.Printf("client %d: list error: %v", clientID, err)
-		return &protocol.Response{Flags: protocol.FlagError}
+		return errorFrame()
 	}
 
-	// Join with newlines
 	payload := []byte(strings.Join(names, "\n"))
-
-	// If it fits in one response, send directly
 	maxPayload := h.responsePayloadSize(session)
-	if len(payload) <= maxPayload {
-		return &protocol.Response{Payload: payload}
-	}
-
-	// Otherwise queue and stream
-	session.QueueData(payload)
-	chunk, more := session.Dequeue(maxPayload)
-	flags := byte(0)
-	if more {
-		flags |= protocol.FlagMoreData
-	}
-	return &protocol.Response{Flags: flags, Payload: chunk}
+	t := session.Transfers.NewTransfer(payload, maxPayload)
+	return h.chunkFrame(t, 0)
 }
 
-func (h *Handler) handleTune(pkt *protocol.Packet, clientID byte) *protocol.Response {
+func (h *Handler) handleTune(pkt *protocol.Packet, clientID byte) *protocol.Frame {
 	session := h.sessions.Get(clientID)
 	if session == nil {
-		return &protocol.Response{Flags: protocol.FlagError}
+		return errorFrame()
 	}
 	session.LastSeen = now()
 
@@ -384,20 +378,18 @@ func (h *Handler) handleTune(pkt *protocol.Packet, clientID byte) *protocol.Resp
 	case 512:
 		testSize = 1000
 	default:
-		// Already at max or unknown, stay where we are
-		return &protocol.Response{Payload: []byte("ok")}
+		return &protocol.Frame{Payload: []byte("ok")}
 	}
 
-	// Send a response padded to the test size
+	// Send a test payload sized to fill the target TuneSize
 	payload := make([]byte, testSize)
 	payload[0] = byte(testSize >> 8)
 	payload[1] = byte(testSize)
-	// Fill rest with recognizable pattern
 	for i := 2; i < len(payload); i++ {
 		payload[i] = byte(i % 256)
 	}
 
-	return &protocol.Response{Payload: payload}
+	return &protocol.Frame{Payload: payload}
 }
 
 // responsePayloadSize returns the max response payload in bytes,

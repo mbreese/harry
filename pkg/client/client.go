@@ -20,17 +20,17 @@ import (
 
 // Config holds client configuration.
 type Config struct {
-	Domain      string        // base domain (e.g., "tunnel.example.com")
-	Password    string        // shared secret
-	Resolver    string        // DNS resolver address (e.g., "8.8.8.8:53")
+	Domain       string        // base domain (e.g., "tunnel.example.com")
+	Password     string        // shared secret
+	Resolver     string        // DNS resolver address (e.g., "8.8.8.8:53")
 	PollInterval time.Duration // idle poll interval (default 30s)
 }
 
 // Client is the DNS tunnel client.
 type Client struct {
-	config      *Config
-	cipher      *crypto.Cipher
-	qc          *protocol.QueryConfig
+	config   *Config
+	cipher   *crypto.Cipher
+	qc       *protocol.QueryConfig
 	clientID byte
 	counter  uint32
 	tuneSize int // negotiated response size
@@ -67,23 +67,22 @@ func (c *Client) Connect() error {
 		Counter: c.nextCounter(),
 	}
 
-	resp, err := c.sendPacket(pkt, 0) // clientID 0 for connect
+	frame, err := c.sendPacket(pkt, 0)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
 
-	if resp.Flags&protocol.FlagError != 0 {
+	if frame.Flags&protocol.FlagError != 0 {
 		return fmt.Errorf("server returned error on connect")
 	}
 
-	if len(resp.Payload) < 1 {
+	if len(frame.Payload) < 1 {
 		return fmt.Errorf("no client ID in connect response")
 	}
 
-	c.clientID = resp.Payload[0]
+	c.clientID = frame.Payload[0]
 	log.Printf("connected with client ID: %d", c.clientID)
 
-	// Run auto-tune
 	if err := c.autoTune(); err != nil {
 		log.Printf("auto-tune failed, using default size %d: %v", c.tuneSize, err)
 	}
@@ -91,8 +90,8 @@ func (c *Client) Connect() error {
 	return nil
 }
 
-// Poll checks the server for queued data.
-func (c *Client) Poll() (*protocol.Response, error) {
+// Poll sends a bare poll (no ACK). Used for pipe/poll modes.
+func (c *Client) Poll() (*protocol.Frame, error) {
 	pkt := &protocol.Packet{
 		Cmd:     protocol.CmdPoll,
 		Counter: c.nextCounter(),
@@ -100,8 +99,70 @@ func (c *Client) Poll() (*protocol.Response, error) {
 	return c.sendPacket(pkt, c.clientID)
 }
 
-// SendData sends upstream data and returns any downstream response.
-func (c *Client) SendData(data []byte) (*protocol.Response, error) {
+// pollAck sends a poll with ACK for a transfer chunk, requesting the next chunk.
+func (c *Client) pollAck(transferID, lastAck uint16) (*protocol.Frame, error) {
+	ackPayload := []byte{
+		byte(transferID >> 8), byte(transferID),
+		byte(lastAck >> 8), byte(lastAck),
+	}
+	encrypted, err := c.cipher.Encrypt(ackPayload)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt ack: %w", err)
+	}
+
+	pkt := &protocol.Packet{
+		Cmd:     protocol.CmdPoll,
+		Counter: c.nextCounter(),
+		Payload: encrypted,
+	}
+	return c.sendPacket(pkt, c.clientID)
+}
+
+// recvTransfer receives all chunks of a transfer started by an initial frame.
+// The initial frame contains chunk 0. Subsequent chunks are fetched via pollAck.
+func (c *Client) recvTransfer(initial *protocol.Frame) ([]byte, error) {
+	if initial.Flags&protocol.FlagError != 0 {
+		if len(initial.Payload) > 0 {
+			return nil, fmt.Errorf("server error: %s", initial.Payload)
+		}
+		return nil, fmt.Errorf("server error")
+	}
+
+	// Single-chunk transfer
+	if initial.ChunkTotal <= 1 {
+		return initial.Payload, nil
+	}
+
+	// Multi-chunk: collect all chunks by index
+	chunks := make([][]byte, initial.ChunkTotal)
+	chunks[0] = initial.Payload
+
+	for idx := uint16(1); idx < initial.ChunkTotal; idx++ {
+		frame, err := c.pollAck(initial.TransferID, idx-1)
+		if err != nil {
+			return nil, fmt.Errorf("transfer %d chunk %d/%d: %w",
+				initial.TransferID, idx, initial.ChunkTotal, err)
+		}
+		if frame.Flags&protocol.FlagError != 0 {
+			return nil, fmt.Errorf("transfer %d chunk %d: server error", initial.TransferID, idx)
+		}
+		if frame.ChunkIdx != idx {
+			return nil, fmt.Errorf("transfer %d: expected chunk %d, got %d",
+				initial.TransferID, idx, frame.ChunkIdx)
+		}
+		chunks[idx] = frame.Payload
+	}
+
+	// Reassemble
+	var result []byte
+	for _, chunk := range chunks {
+		result = append(result, chunk...)
+	}
+	return result, nil
+}
+
+// SendData sends upstream data and returns the server's frame.
+func (c *Client) SendData(data []byte) (*protocol.Frame, error) {
 	encrypted, err := c.cipher.Encrypt(data)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt: %w", err)
@@ -117,13 +178,11 @@ func (c *Client) SendData(data []byte) (*protocol.Response, error) {
 
 // FetchFlags controls fetch behavior.
 const (
-	FetchNoRedirect byte = 1 << 0 // Don't follow redirects
+	FetchNoRedirect byte = 1 << 0
 )
 
 // FetchURL requests the server to fetch a URL and returns the response.
-// flags controls behavior (e.g., FetchNoRedirect).
 func (c *Client) FetchURL(url string, flags byte) ([]byte, error) {
-	// Payload: [flags 1B] [url...]
 	payload := append([]byte{flags}, []byte(url)...)
 	encrypted, err := c.cipher.Encrypt(payload)
 	if err != nil {
@@ -136,29 +195,12 @@ func (c *Client) FetchURL(url string, flags byte) ([]byte, error) {
 		Payload: encrypted,
 	}
 
-	var result []byte
-
-	resp, err := c.sendPacket(pkt, c.clientID)
+	frame, err := c.sendPacket(pkt, c.clientID)
 	if err != nil {
 		return nil, err
 	}
-	if resp.Flags&protocol.FlagError != 0 {
-		if len(resp.Payload) > 0 {
-			return nil, fmt.Errorf("%s", resp.Payload)
-		}
-		return nil, fmt.Errorf("server error fetching URL")
-	}
-	result = append(result, resp.Payload...)
 
-	for resp.Flags&protocol.FlagMoreData != 0 {
-		resp, err = c.Poll()
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, resp.Payload...)
-	}
-
-	return result, nil
+	return c.recvTransfer(frame)
 }
 
 // ListFiles returns the list of files available on the server.
@@ -168,23 +210,14 @@ func (c *Client) ListFiles() ([]string, error) {
 		Counter: c.nextCounter(),
 	}
 
-	var result []byte
-
-	resp, err := c.sendPacket(pkt, c.clientID)
+	frame, err := c.sendPacket(pkt, c.clientID)
 	if err != nil {
 		return nil, err
 	}
-	if resp.Flags&protocol.FlagError != 0 {
-		return nil, fmt.Errorf("server error listing files")
-	}
-	result = append(result, resp.Payload...)
 
-	for resp.Flags&protocol.FlagMoreData != 0 {
-		resp, err = c.Poll()
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, resp.Payload...)
+	result, err := c.recvTransfer(frame)
+	if err != nil {
+		return nil, err
 	}
 
 	if len(result) == 0 {
@@ -207,24 +240,14 @@ func (c *Client) RequestFile(name string) ([]byte, error) {
 		Payload: encrypted,
 	}
 
-	var result []byte
-
-	resp, err := c.sendPacket(pkt, c.clientID)
+	frame, err := c.sendPacket(pkt, c.clientID)
 	if err != nil {
 		return nil, err
 	}
-	if resp.Flags&protocol.FlagError != 0 {
-		return nil, fmt.Errorf("file not found: %s", name)
-	}
 
-	result = append(result, resp.Payload...)
-
-	for resp.Flags&protocol.FlagMoreData != 0 {
-		resp, err = c.Poll()
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, resp.Payload...)
+	result, err := c.recvTransfer(frame)
+	if err != nil {
+		return nil, err
 	}
 
 	// First 20 bytes are SHA1 hash from server
@@ -263,11 +286,11 @@ func (c *Client) UploadFile(localPath, remoteName string) error {
 		Payload: encName,
 	}
 
-	resp, err := c.sendPacket(pkt, c.clientID)
+	frame, err := c.sendPacket(pkt, c.clientID)
 	if err != nil {
 		return fmt.Errorf("upload start: %w", err)
 	}
-	if resp.Flags&protocol.FlagError != 0 {
+	if frame.Flags&protocol.FlagError != 0 {
 		return fmt.Errorf("server rejected upload")
 	}
 
@@ -296,11 +319,11 @@ func (c *Client) UploadFile(localPath, remoteName string) error {
 			Payload: encrypted,
 		}
 
-		resp, err := c.sendPacket(pkt, c.clientID)
+		frame, err := c.sendPacket(pkt, c.clientID)
 		if err != nil {
 			return fmt.Errorf("upload chunk: %w", err)
 		}
-		if resp.Flags&protocol.FlagError != 0 {
+		if frame.Flags&protocol.FlagError != 0 {
 			return fmt.Errorf("server error during upload at byte %d", sent)
 		}
 
@@ -322,13 +345,13 @@ func (c *Client) UploadFile(localPath, remoteName string) error {
 		Counter: c.nextCounter(),
 		Payload: encHash,
 	}
-	resp, err = c.sendPacket(pkt, c.clientID)
+	frame, err = c.sendPacket(pkt, c.clientID)
 	if err != nil {
 		return fmt.Errorf("upload done: %w", err)
 	}
-	if resp.Flags&protocol.FlagError != 0 {
-		if len(resp.Payload) > 0 {
-			return fmt.Errorf("upload verification failed: %s", resp.Payload)
+	if frame.Flags&protocol.FlagError != 0 {
+		if len(frame.Payload) > 0 {
+			return fmt.Errorf("upload verification failed: %s", frame.Payload)
 		}
 		return fmt.Errorf("server error on upload complete")
 	}
@@ -354,13 +377,13 @@ func (c *Client) autoTune() error {
 			Payload: encrypted,
 		}
 
-		resp, err := c.sendPacket(pkt, c.clientID)
+		frame, err := c.sendPacket(pkt, c.clientID)
 		if err != nil {
 			log.Printf("auto-tune: size %d failed: %v", size, err)
 			break
 		}
 
-		if resp.Flags&protocol.FlagError != 0 {
+		if frame.Flags&protocol.FlagError != 0 {
 			break
 		}
 
@@ -371,20 +394,18 @@ func (c *Client) autoTune() error {
 	return nil
 }
 
-// sendPacket encodes a packet as a DNS query and sends it.
-func (c *Client) sendPacket(pkt *protocol.Packet, clientID byte) (*protocol.Response, error) {
+// sendPacket encodes a packet as a DNS query, sends it, and returns the decoded frame.
+func (c *Client) sendPacket(pkt *protocol.Packet, clientID byte) (*protocol.Frame, error) {
 	query, err := c.qc.EncodeQuery(pkt, clientID)
 	if err != nil {
 		return nil, fmt.Errorf("encode query: %w", err)
 	}
 
-	// Build DNS message
 	msg := new(dns.Msg)
 	msg.SetQuestion(dns.Fqdn(query), dns.TypeTXT)
 	msg.RecursionDesired = true
-	msg.SetEdns0(4096, false) // Request larger UDP buffer
+	msg.SetEdns0(4096, false)
 
-	// Send query
 	dnsClient := &dns.Client{Timeout: 10 * time.Second}
 	resp, _, err := dnsClient.Exchange(msg, c.config.Resolver)
 	if err != nil {
@@ -395,7 +416,6 @@ func (c *Client) sendPacket(pkt *protocol.Packet, clientID byte) (*protocol.Resp
 		return nil, fmt.Errorf("dns error: %s", dns.RcodeToString[resp.Rcode])
 	}
 
-	// Extract TXT record
 	var txt string
 	for _, rr := range resp.Answer {
 		if t, ok := rr.(*dns.TXT); ok {
@@ -410,40 +430,29 @@ func (c *Client) sendPacket(pkt *protocol.Packet, clientID byte) (*protocol.Resp
 		return nil, fmt.Errorf("no TXT record in response")
 	}
 
-	// Base36 decode
 	rawData, err := encoding.Decode(txt)
 	if err != nil {
 		return nil, fmt.Errorf("base36 decode: %w", err)
 	}
 
-	// Verify CRC and extract frame components
-	seq, flags, encPayload, err := protocol.UnmarshalFrame(rawData)
+	frame, err := protocol.UnmarshalFrame(rawData)
 	if err != nil {
 		return nil, fmt.Errorf("response frame: %w", err)
 	}
 
-	// Verify sequence number matches our request counter
-	expectedSeq := uint16(pkt.Counter & 0xFFFF)
-	if seq != expectedSeq {
-		return nil, fmt.Errorf("sequence mismatch: expected %d, got %d", expectedSeq, seq)
-	}
-
-	resp2 := &protocol.Response{Flags: flags}
-
 	// Decrypt payload if present
-	if len(encPayload) > 0 {
-		decrypted, err := c.cipher.Decrypt(encPayload)
+	if len(frame.Payload) > 0 {
+		decrypted, err := c.cipher.Decrypt(frame.Payload)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt response: %w", err)
 		}
-		resp2.Payload = decrypted
+		frame.Payload = decrypted
 	}
 
-	return resp2, nil
+	return frame, nil
 }
 
 // systemResolver reads the first nameserver from /etc/resolv.conf.
-// Falls back to 127.0.0.53:53 if the file can't be read.
 func systemResolver() string {
 	data, err := os.ReadFile("/etc/resolv.conf")
 	if err != nil {
@@ -469,5 +478,5 @@ func (c *Client) nextCounter() uint32 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.counter++
-	return c.counter & 0xFFFFFF // 24 bits
+	return c.counter & 0xFFFFFF
 }

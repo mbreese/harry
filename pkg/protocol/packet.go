@@ -205,24 +205,39 @@ type Response struct {
 }
 
 // Frame constants for the wire format.
+// Response frame: [crc32 4B] [transfer_id 2B] [chunk_idx 2B] [chunk_total 2B] [flags 1B] [encrypted...]
 const (
-	CRCSize       = 4 // CRC32
-	SeqSize       = 2 // uint16 sequence number
-	FrameOverhead = CRCSize + SeqSize + 1 // +1 for flags byte
+	CRCSize       = 4  // CRC32
+	TransferIDSize = 2 // uint16 transfer ID
+	ChunkIdxSize   = 2 // uint16 chunk index
+	ChunkTotalSize = 2 // uint16 total chunks
+	FlagsSize      = 1
+	FrameHeaderSize = TransferIDSize + ChunkIdxSize + ChunkTotalSize + FlagsSize // 7
+	FrameOverhead   = CRCSize + FrameHeaderSize // 11
 )
 
-// MarshalFrame builds a wire-format frame:
-//
-//	[crc32 4B] [seq 2B] [flags 1B] [encrypted_payload...]
-//
-// CRC32 covers everything after itself (seq + flags + payload).
-func MarshalFrame(seq uint16, flags byte, encryptedPayload []byte) []byte {
-	// Build inner: [seq 2B][flags 1B][encrypted_payload]
-	inner := make([]byte, SeqSize+1+len(encryptedPayload))
-	inner[0] = byte(seq >> 8)
-	inner[1] = byte(seq)
-	inner[2] = flags
-	copy(inner[3:], encryptedPayload)
+// Frame holds the decoded components of a wire-format frame.
+type Frame struct {
+	TransferID uint16
+	ChunkIdx   uint16
+	ChunkTotal uint16
+	Flags      byte
+	Payload    []byte // encrypted payload
+}
+
+// MarshalFrame builds a wire-format frame with CRC.
+// CRC32 covers everything after itself.
+func MarshalFrame(f *Frame) []byte {
+	// Build inner: [transfer_id 2B][chunk_idx 2B][chunk_total 2B][flags 1B][payload]
+	inner := make([]byte, FrameHeaderSize+len(f.Payload))
+	inner[0] = byte(f.TransferID >> 8)
+	inner[1] = byte(f.TransferID)
+	inner[2] = byte(f.ChunkIdx >> 8)
+	inner[3] = byte(f.ChunkIdx)
+	inner[4] = byte(f.ChunkTotal >> 8)
+	inner[5] = byte(f.ChunkTotal)
+	inner[6] = f.Flags
+	copy(inner[7:], f.Payload)
 
 	// Compute CRC over inner
 	crc := crc32.ChecksumIEEE(inner)
@@ -239,10 +254,9 @@ func MarshalFrame(seq uint16, flags byte, encryptedPayload []byte) []byte {
 }
 
 // UnmarshalFrame verifies the CRC and extracts frame components.
-// Returns an error if the CRC doesn't match (truncation/corruption).
-func UnmarshalFrame(data []byte) (seq uint16, flags byte, encryptedPayload []byte, err error) {
+func UnmarshalFrame(data []byte) (*Frame, error) {
 	if len(data) < FrameOverhead {
-		return 0, 0, nil, fmt.Errorf("frame too short: %d bytes", len(data))
+		return nil, fmt.Errorf("frame too short: %d bytes", len(data))
 	}
 
 	// Extract and verify CRC
@@ -250,14 +264,16 @@ func UnmarshalFrame(data []byte) (seq uint16, flags byte, encryptedPayload []byt
 	inner := data[CRCSize:]
 	actualCRC := crc32.ChecksumIEEE(inner)
 	if expectedCRC != actualCRC {
-		return 0, 0, nil, fmt.Errorf("CRC mismatch: expected %08x, got %08x (data corrupted or truncated)", expectedCRC, actualCRC)
+		return nil, fmt.Errorf("CRC mismatch: expected %08x, got %08x", expectedCRC, actualCRC)
 	}
 
-	seq = uint16(inner[0])<<8 | uint16(inner[1])
-	flags = inner[2]
-	encryptedPayload = inner[3:]
-
-	return seq, flags, encryptedPayload, nil
+	return &Frame{
+		TransferID: uint16(inner[0])<<8 | uint16(inner[1]),
+		ChunkIdx:   uint16(inner[2])<<8 | uint16(inner[3]),
+		ChunkTotal: uint16(inner[4])<<8 | uint16(inner[5]),
+		Flags:      inner[6],
+		Payload:    inner[7:],
+	}, nil
 }
 
 // clientIDToBlockLens returns the lengths of blocks 1-3 for a given client ID (0-63).

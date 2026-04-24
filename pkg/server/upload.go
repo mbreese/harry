@@ -13,39 +13,35 @@ import (
 )
 
 // handleUploadStart begins a new file upload.
-// Payload is the filename to upload to.
-func (h *Handler) handleUploadStart(pkt *protocol.Packet, clientID byte) *protocol.Response {
+func (h *Handler) handleUploadStart(pkt *protocol.Packet, clientID byte) *protocol.Frame {
 	session := h.sessions.Get(clientID)
 	if session == nil {
-		return &protocol.Response{Flags: protocol.FlagError}
+		return errorFrame()
 	}
 	session.LastSeen = now()
 
 	if h.config.UploadDir == "" {
 		log.Printf("client %d: upload rejected, no upload directory configured", clientID)
-		return &protocol.Response{Flags: protocol.FlagError}
+		return errorFrame()
 	}
 
 	filename := string(pkt.Payload)
 	if filename == "" {
 		log.Printf("client %d: upload rejected, empty filename", clientID)
-		return &protocol.Response{Flags: protocol.FlagError}
+		return errorFrame()
 	}
 
-	// Sanitize filename
 	clean := filepath.Base(filename)
 	if clean == "." || clean == ".." || strings.ContainsAny(clean, "/\\") {
 		log.Printf("client %d: upload rejected, invalid filename: %q", clientID, filename)
-		return &protocol.Response{Flags: protocol.FlagError}
+		return errorFrame()
 	}
 
 	path := filepath.Join(h.config.UploadDir, clean)
-
-	// Create/truncate the file
 	f, err := os.Create(path)
 	if err != nil {
 		log.Printf("client %d: upload create error: %v", clientID, err)
-		return &protocol.Response{Flags: protocol.FlagError}
+		return errorFrame()
 	}
 	f.Close()
 
@@ -53,36 +49,31 @@ func (h *Handler) handleUploadStart(pkt *protocol.Packet, clientID byte) *protoc
 	session.UploadBytes = 0
 	log.Printf("client %d: upload started: %q", clientID, clean)
 
-	return &protocol.Response{
-		Payload: []byte("ok"),
-	}
+	return &protocol.Frame{Payload: []byte("ok")}
 }
 
 // handleUploadDone completes the current upload.
-func (h *Handler) handleUploadDone(pkt *protocol.Packet, clientID byte) *protocol.Response {
+func (h *Handler) handleUploadDone(pkt *protocol.Packet, clientID byte) *protocol.Frame {
 	session := h.sessions.Get(clientID)
 	if session == nil {
-		return &protocol.Response{Flags: protocol.FlagError}
+		return errorFrame()
 	}
 	session.LastSeen = now()
 
 	if session.UploadFile == "" {
 		log.Printf("client %d: upload done but no active upload", clientID)
-		return &protocol.Response{Flags: protocol.FlagError}
+		return errorFrame()
 	}
 
-	// Read the uploaded file and compute SHA1
 	path := filepath.Join(h.config.UploadDir, session.UploadFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		log.Printf("client %d: upload verify error: %v", clientID, err)
-		return &protocol.Response{Flags: protocol.FlagError}
+		return errorFrame()
 	}
 
 	serverHash := sha1.Sum(data)
 	serverHex := hex.EncodeToString(serverHash[:])
-
-	// Client sends SHA1 hex string in payload
 	clientHex := string(pkt.Payload)
 
 	if clientHex != serverHex {
@@ -90,7 +81,7 @@ func (h *Handler) handleUploadDone(pkt *protocol.Packet, clientID byte) *protoco
 			clientID, session.UploadFile, clientHex, serverHex)
 		session.UploadFile = ""
 		session.UploadBytes = 0
-		return &protocol.Response{
+		return &protocol.Frame{
 			Flags:   protocol.FlagError,
 			Payload: []byte("hash mismatch"),
 		}
@@ -100,9 +91,7 @@ func (h *Handler) handleUploadDone(pkt *protocol.Packet, clientID byte) *protoco
 	session.UploadFile = ""
 	session.UploadBytes = 0
 
-	return &protocol.Response{
-		Payload: []byte("ok:" + serverHex),
-	}
+	return &protocol.Frame{Payload: []byte("ok:" + serverHex)}
 }
 
 // appendUpload appends data to the active upload file.
