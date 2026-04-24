@@ -15,8 +15,11 @@ import (
 )
 
 const (
-	// Each chunk is one TXT string (max 253 chars to stay safe).
-	bootChunkSize = 253
+	// Each TXT response can contain multiple strings (up to 255 bytes each).
+	// We pack 3 strings per chunk for better throughput.
+	bootTXTStringSize   = 253
+	bootStringsPerChunk = 3
+	bootChunkSize       = bootTXTStringSize * bootStringsPerChunk // 759
 )
 
 // bootstrapCache stores compressed+chunked files on disk.
@@ -197,7 +200,7 @@ func (h *Handler) stage1Script() string {
 // stage2Script returns the full download script.
 // No double quotes allowed - chunks go through xargs.
 func (h *Handler) stage2Script() string {
-	return fmt.Sprintf(`D=%s;O=$(uname -s|tr A-Z a-z);A=$(uname -m);case $A in x86_64)A=amd64;;aarch64)A=arm64;;esac;F=harry-$O-$A;echo downloading $F;N=$(dig +short TXT n.$F.boot.$D|head -1|sed s/[^0-9]//g);echo $N chunks;i=0;B=;while [ $i -lt $N ];do C=$(dig +short TXT $i.$F.boot.$D|sed s/[^A-Za-z0-9+/=]//g);B=${B}$C;i=$((i+1));case $((i%%100)) in 0)echo $i/$N;;esac;done;echo;printf %%s $B|base64 -d|gunzip>harry;chmod +x harry;echo done`,
+	return fmt.Sprintf(`D=%s;O=$(uname -s|tr A-Z a-z);A=$(uname -m);case $A in x86_64)A=amd64;;aarch64)A=arm64;;esac;F=harry-$O-$A;echo downloading $F;N=$(dig +short TXT n.$F.boot.$D|head -1|tr -dc 0-9);echo $N chunks;i=0;B=;while [ $i -lt $N ];do C=$(dig +short TXT $i.$F.boot.$D|tr -dc A-Za-z0-9+/=);B=${B}$C;i=$((i+1));case $((i%%100)) in 0)echo $i/$N;;esac;done;echo;printf %%s $B|base64 -d|gunzip>harry;chmod +x harry;echo done`,
 		h.config.Domain)
 }
 
