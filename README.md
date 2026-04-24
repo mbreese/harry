@@ -59,7 +59,9 @@ The server must be configured as the authoritative nameserver for the specified 
 | `-listen` | `:53` | Listen address (host:port) |
 | `-files` | `./files` | Directory for downloadable files |
 | `-uploads` | `./uploads` | Directory for uploaded files |
+| `-cache` | (temp dir) | Bootstrap cache directory |
 | `-ttl` | `1` | DNS record TTL |
+| `-verbose` | `false` | Log all queries and packet details |
 
 ## Client
 
@@ -93,6 +95,9 @@ harry upload /path/to/local.txt
 # Upload with a different remote name
 harry upload /path/to/local.txt remote-name.txt
 
+# Force overwrite existing file on server
+harry -f upload /path/to/local.txt
+
 # Fetch a URL via the server (output to stdout)
 harry fetch http://example.com
 
@@ -113,9 +118,10 @@ harry poll
 |------|---------|-------------|
 | `-domain` | | Base domain |
 | `-password` | | Shared secret |
-| `-resolver` | `8.8.8.8:53` | DNS resolver address |
+| `-resolver` | (system) | DNS resolver address (reads `/etc/resolv.conf` by default) |
 | `-poll` | `30s` | Idle poll interval |
-| `-o` | (stdout) | Output file for download/fetch |
+| `-o` | (local name) | Output file for download (stdout for fetch) |
+| `-f` | `false` | Force overwrite existing file on server |
 | `-no-redirect` | `false` | Don't follow HTTP redirects |
 | `-rc` | `~/.harryrc` | RC file path |
 
@@ -127,8 +133,8 @@ If you only have access to `dig`, you can bootstrap the full client over DNS:
 # Step 1: Check the instructions
 dig TXT boothelp.tunnel.example.com
 
-# Step 2: Run the bootstrap (set R to your resolver if not 8.8.8.8)
-dig +short TXT boot.tunnel.example.com @8.8.8.8 | xargs echo | sh
+# Step 2: Run the bootstrap (uses system resolver)
+dig +short TXT boot.tunnel.example.com | xargs echo | sh
 ```
 
 This will:
@@ -138,8 +144,49 @@ This will:
 
 The server must have the platform binaries in its files directory (`harry-darwin-arm64`, `harry-linux-amd64`, `harry-linux-arm64`). Run `make bootstrap` and copy them to the files directory.
 
+## DNS Setup
+
+To use Harry, you need two DNS records at your domain registrar:
+
+1. **A record** for the nameserver: `harry-ns.example.com → A → <server IP>`
+2. **NS record** delegating the tunnel subdomain: `tunnel.example.com → NS → harry-ns.example.com`
+
+Then run `harry-server` on that IP, listening on port 53.
+
 ## Throughput
 
 Upstream (client → server) is limited by DNS query size — roughly 120 bytes per query depending on domain length. Downstream (server → client) is limited by TXT record size — up to ~600 bytes per response after auto-tune and encryption overhead.
 
 File uploads will be slow. Downloads are faster but still constrained by DNS round-trip times.
+
+## Reliability
+
+Responses use a wire frame format with CRC32 integrity checks, transfer IDs, and chunk indexing:
+
+```
+[CRC32 4B] [transfer_id 2B] [chunk_idx 2B] [chunk_total 2B] [flags 1B] [encrypted...]
+```
+
+- **CRC32** detects DNS-level truncation or corruption
+- **Indexed chunks** enable reliable multi-chunk transfers with implicit ACK/NAK
+- **Deduplication** handles DNS resolver retries (which can replay requests)
+- **SHA1 verification** on file uploads and downloads catches end-to-end corruption
+
+## Security Considerations
+
+**Encrypted (AES-256-GCM, unique random nonce per message):**
+- All tunnel payloads in both directions — file data, filenames, commands, responses
+- Key derived from shared password via PBKDF2 (100,000 iterations, SHA-256)
+- Each encrypted message is unique due to random nonce, making DNS response caching harmless
+
+**Not encrypted (plaintext):**
+- Bootstrap script and client binary chunks (served as base64/gzip over DNS)
+- Bootstrap metadata queries (file size, SHA1, chunk count)
+- SOA/NS responses
+
+**Known limitations:**
+- **Traffic analysis**: An observer can see DNS query frequency and sizes to `*.tunnel.example.com`, and can infer activity patterns (uploads vs downloads, approximate file sizes) even without reading payloads
+- **Session exhaustion**: The server supports 64 concurrent sessions. There is no authentication on the initial connect — anyone who knows the domain can consume a session slot (though they cannot decrypt the response without the password)
+- **Bootstrap exposure**: Client binaries are served in cleartext over DNS. An observer can see what software is being downloaded during bootstrap
+- **No rate limiting**: Failed decryption attempts (wrong password) are not rate-limited. The server rejects them but does not track or block repeated failures
+- **Shared secret**: All clients use the same password. There is no per-client authentication or key rotation
