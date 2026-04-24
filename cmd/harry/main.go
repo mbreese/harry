@@ -18,8 +18,8 @@ import (
 const usage = `Usage: harry [flags] <command> [args]
 
 Commands:
-  download <remote> [local]   Download a file from the server
-  upload <local> [remote]    Upload a file to the server
+  download <remote> [local]  Download a file (local defaults to remote name, - for stdout)
+  upload <local> [remote]    Upload a file (remote defaults to local name)
   list                       List available files on the server
   fetch <url>                Fetch a URL via the server (stdout)
   pipe                       Bidirectional stdin/stdout tunnel
@@ -34,8 +34,7 @@ func main() {
 	resolver := flag.String("resolver", "", "DNS resolver (host:port, default: system resolver)")
 	pollInterval := flag.Duration("poll", 30*time.Second, "idle poll interval")
 	noRedirect := flag.Bool("no-redirect", false, "don't follow HTTP redirects (for fetch)")
-	force := flag.Bool("f", false, "force overwrite existing file (for upload)")
-	output := flag.String("o", "", "output file (for fetch/download, default: stdout)")
+	force := flag.Bool("f", false, "force overwrite existing file")
 	rcFile := flag.String("rc", "", "RC file path (default: ~/.harryrc)")
 
 	flag.Usage = func() {
@@ -101,12 +100,14 @@ func main() {
 		if err != nil {
 			log.Fatalf("download failed: %v", err)
 		}
-		outPath := *output
-		if outPath == "" {
-			if len(cmdArgs) >= 2 {
-				outPath = cmdArgs[1]
-			} else {
-				outPath = filepath.Base(cmdArgs[0])
+		outPath := filepath.Base(cmdArgs[0])
+		if len(cmdArgs) >= 2 {
+			outPath = cmdArgs[1]
+		}
+		// Check if local file exists (unless -f or writing to stdout)
+		if outPath != "-" && !*force {
+			if _, err := os.Stat(outPath); err == nil {
+				log.Fatalf("file exists: %s (use -f to overwrite)", outPath)
 			}
 		}
 		writeOutput(data, outPath)
@@ -140,7 +141,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("fetch failed: %v", err)
 		}
-		writeOutput(data, *output)
+		writeOutput(data, "-")
 
 	case "list":
 		files, err := c.ListFiles()
@@ -172,9 +173,9 @@ func main() {
 	}
 }
 
-// writeOutput writes data to a file or stdout.
+// writeOutput writes data to a file, or stdout if path is "-".
 func writeOutput(data []byte, path string) {
-	if path == "" {
+	if path == "-" {
 		os.Stdout.Write(data)
 		return
 	}
