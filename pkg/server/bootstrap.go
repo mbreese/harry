@@ -216,7 +216,7 @@ func (h *Handler) stage1Script() string {
 // stage2Script returns the full download script.
 // No double quotes allowed - chunks go through xargs.
 func (h *Handler) stage2Script() string {
-	return fmt.Sprintf(`D=%s;O=$(uname -s|tr A-Z a-z);A=$(uname -m);case $A in x86_64)A=amd64;;aarch64)A=arm64;;esac;F=harry-$O-$A;I=$(dig +short TXT info.$F.boot.$D|tr -dc 0-9a-f\ |head -1);SZ=$(echo $I|cut -d\  -f1);H=$(echo $I|cut -d\  -f2);echo downloading $F size=$SZ sha1=$H;N=$(dig +short TXT n.$F.boot.$D|head -1|tr -dc 0-9);echo $N chunks;i=0;B=;while [ $i -lt $N ];do C=$(dig +short TXT $i.$F.boot.$D|tr -dc A-Za-z0-9+/=);B=${B}$C;i=$((i+1));case $((i%%100)) in 0)echo $i/$N;;esac;done;echo;printf %%s $B|base64 -d|gunzip>harry;chmod +x harry;G=$(sha1sum harry 2>/dev/null||shasum harry);G=$(echo $G|cut -d\  -f1);case $G in $H)echo verified sha1=$G;;*)echo HASH MISMATCH expected=$H got=$G;;esac;echo done`,
+	return fmt.Sprintf(`D=%s;O=$(uname -s|tr A-Z a-z);A=$(uname -m);case $A in x86_64)A=amd64;;aarch64)A=arm64;;esac;F=harry-$O-$A;set -- $(dig +short TXT info.$F.boot.$D|tr -dc 0-9a-f\ |head -1);SZ=$1;H=$2;echo downloading $F size=$SZ sha1=$H;N=$(dig +short TXT n.$F.boot.$D|head -1|tr -dc 0-9);echo $N chunks;i=0;B=;while [ $i -lt $N ];do C=$(dig +short TXT $i.$F.boot.$D|tr -dc A-Za-z0-9+/=);B=${B}$C;i=$((i+1));case $((i%%100)) in 0)echo $i/$N;;esac;done;echo;printf %%s $B|base64 -d|gunzip>harry;chmod +x harry;set -- $(sha1sum harry 2>/dev/null||shasum harry);G=$1;case $G in $H)echo verified sha1=$G;;*)echo HASH MISMATCH expected=$H got=$G;;esac;echo done`,
 		h.config.Domain)
 }
 
