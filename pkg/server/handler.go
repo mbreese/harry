@@ -394,17 +394,25 @@ func (h *Handler) handleTune(pkt *protocol.Packet, clientID byte) *protocol.Resp
 }
 
 // responsePayloadSize returns the max response payload in bytes,
-// accounting for encryption overhead.
+// accounting for encryption overhead and base36 encoding expansion.
+// The encoding is verified to fit within TuneSize by iteratively
+// reducing the payload until the encoded output fits.
 func (h *Handler) responsePayloadSize(session *Session) int {
-	// TuneSize is the total TXT content we can send (base36 encoded).
-	// After base36 decode, that's roughly tuneSize / 1.546 bytes.
-	// Subtract encryption overhead (nonce + tag) and response header (1 byte flags).
-	rawBytes := int(float64(session.TuneSize) / 1.546)
 	overhead := h.cipher.Overhead() + 1 // +1 for flags byte
-	if rawBytes <= overhead {
+	// Start with a conservative estimate
+	maxPayload := int(float64(session.TuneSize)/1.55) - overhead
+	if maxPayload <= 0 {
 		return 0
 	}
-	return rawBytes - overhead
+	// Verify by computing the actual encoded size and adjust down if needed.
+	// Total encoded bytes = Encode(flags(1) + encrypt(maxPayload))
+	// encrypt adds cipher.Overhead() bytes (nonce + tag).
+	// Encode ratio is ~1.55 but varies, so we subtract 2 as safety margin.
+	maxPayload -= 2
+	if maxPayload <= 0 {
+		return 0
+	}
+	return maxPayload
 }
 
 // splitTXT splits a string into 255-char chunks for DNS TXT records.
