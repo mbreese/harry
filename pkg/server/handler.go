@@ -68,24 +68,60 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	q := r.Question[0]
 	src := w.RemoteAddr().String()
 
-	// Only handle TXT queries under our domain
-	if q.Qtype != dns.TypeTXT {
-		if h.config.Verbose {
-			log.Printf("[%s] ignoring non-TXT query: %s %s", src, dns.TypeToString[q.Qtype], q.Name)
-		}
-		msg.Rcode = dns.RcodeNameError
-		w.WriteMsg(msg)
-		return
-	}
-
 	// Strip trailing dot from DNS name
 	qname := strings.TrimSuffix(q.Name, ".")
 	qnameLower := strings.ToLower(qname)
 	domainLower := strings.ToLower(h.config.Domain)
 
+	// Reject queries outside our domain entirely
 	if !strings.HasSuffix(qnameLower, "."+domainLower) && qnameLower != domainLower {
 		if h.config.Verbose {
-			log.Printf("[%s] ignoring query outside domain: %s", src, qname)
+			log.Printf("[%s] ignoring query outside domain: %s %s", src, dns.TypeToString[q.Qtype], qname)
+		}
+		// Don't respond at all — we're not authoritative for other domains
+		return
+	}
+
+	// Handle SOA queries (resolvers need this to validate our authority)
+	if q.Qtype == dns.TypeSOA {
+		msg.Answer = append(msg.Answer, &dns.SOA{
+			Hdr: dns.RR_Header{
+				Name:   dns.Fqdn(h.config.Domain),
+				Rrtype: dns.TypeSOA,
+				Class:  dns.ClassINET,
+				Ttl:    3600,
+			},
+			Ns:      dns.Fqdn("ns." + h.config.Domain),
+			Mbox:    dns.Fqdn("admin." + h.config.Domain),
+			Serial:  1,
+			Refresh: 3600,
+			Retry:   600,
+			Expire:  86400,
+			Minttl:  60,
+		})
+		w.WriteMsg(msg)
+		return
+	}
+
+	// Handle NS queries
+	if q.Qtype == dns.TypeNS {
+		msg.Answer = append(msg.Answer, &dns.NS{
+			Hdr: dns.RR_Header{
+				Name:   dns.Fqdn(h.config.Domain),
+				Rrtype: dns.TypeNS,
+				Class:  dns.ClassINET,
+				Ttl:    3600,
+			},
+			Ns: dns.Fqdn("ns." + h.config.Domain),
+		})
+		w.WriteMsg(msg)
+		return
+	}
+
+	// Only handle TXT queries for tunnel/bootstrap
+	if q.Qtype != dns.TypeTXT {
+		if h.config.Verbose {
+			log.Printf("[%s] ignoring non-TXT query: %s %s", src, dns.TypeToString[q.Qtype], qname)
 		}
 		msg.Rcode = dns.RcodeNameError
 		w.WriteMsg(msg)
