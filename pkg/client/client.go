@@ -626,12 +626,22 @@ func (c *Client) sendPacket(pkt *protocol.Packet, channelID byte) (*protocol.Fra
 	msg.RecursionDesired = true
 	msg.SetEdns0(4096, false)
 
-	dnsClient := &dns.Client{Timeout: 10 * time.Second}
-	resp, _, err := dnsClient.Exchange(msg, c.config.Resolver)
-	if err != nil {
-		return nil, fmt.Errorf("dns exchange: %w", err)
+	var resp *dns.Msg
+	for attempt := 1; attempt <= 3; attempt ++ {
+		var err error
+		dnsClient := &dns.Client{Timeout: 30 * time.Second}
+		resp, _, err = dnsClient.Exchange(msg, c.config.Resolver)
+		if err != nil {
+			if attempt < 3 {
+				fmt.Printf("error: %s; will retry %d\n", err, attempt)
+				for i:=0; i < attempt; i ++ {	
+					time.Sleep(time.Second * 10)
+				}
+				continue
+			}
+			return nil, fmt.Errorf("dns exchange: %w", err)
+		}
 	}
-
 	if resp.Rcode != dns.RcodeSuccess {
 		return nil, fmt.Errorf("dns error: %s", dns.RcodeToString[resp.Rcode])
 	}
