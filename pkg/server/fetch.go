@@ -62,12 +62,13 @@ func (h *Handler) handleFetch(pkt *protocol.Packet, channelID byte) *protocol.Fr
 		return &protocol.Frame{Flags: protocol.FlagError, Payload: []byte(errMsg)}
 	}
 
-	header := fmt.Sprintf("HTTP %d %s\n", resp.StatusCode, resp.Status)
-	fullResp := append([]byte(header), body...)
+	//header := fmt.Sprintf("HTTP %d %s\n", resp.StatusCode, resp.Status)
+	//fullResp := append([]byte(header), body...)
 
 	log.Printf("ch %d: fetched %s (%d bytes, status %d)", channelID, url, len(body), resp.StatusCode)
 
 	maxPayload := h.responsePayloadSize(session)
-	t := session.Transfers.NewTransfer(fullResp, maxPayload)
+	//t := session.Transfers.NewTransfer(fullResp, maxPayload)
+	t := session.Transfers.NewTransfer(body, maxPayload)
 	return h.chunkFrame(t, 0)
 }
